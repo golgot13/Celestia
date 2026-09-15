@@ -142,7 +142,7 @@ pub fn schedule_observation_queue(
                 target_name: target.name,
                 ra_deg: target.ra_deg,
                 dec_deg: target.dec_deg,
-                priority: target.priority,
+                priority: target.priority as u32,
                 altitude_deg: vis.altitude_deg,
                 azimuth_deg: vis.azimuth_deg,
                 airmass: vis.airmass,

@@ -1,0 +1,21 @@
+{
+  "site_latitude_deg": 43.9308,
+  "site_longitude_deg": 5.7133,
+  "total_targets": 2,
+  "observable_targets": 1,
+  "total_estimated_duration_s": 120.00,
+  "queue": [
+    {
+      "rank": 1,
+      "target_name": "M31",
+      "ra_deg": 10.6847,
+      "dec_deg": 41.2687,
+      "priority": 5,
+      "altitude_deg": 30.62,
+      "azimuth_deg": 60.39,
+      "airmass": 1.958,
+      "merit_score": 255.37,
+      "estimated_duration_s": 120.0
+    }
+  ]
+}

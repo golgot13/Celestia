@@ -53,7 +53,12 @@ pub fn compute_airmass(altitude_rad: f64) -> f64 {
         return f64::INFINITY;
     }
 
-    let sec_z = 1.0 / altitude_rad.cos();
+    let sin_alt = altitude_rad.sin();
+    if sin_alt <= 1e-12 {
+        return f64::INFINITY;
+    }
+
+    let sec_z = 1.0 / sin_alt;
     let delta = sec_z - 1.0;
     let airmass = sec_z
         - 0.0018167 * delta
@@ -83,5 +88,11 @@ mod tests {
     fn airmass_is_one_at_zenith() {
         let value = compute_airmass(PI / 2.0);
         assert!((value - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn airmass_is_two_near_thirty_deg_altitude() {
+        let value = compute_airmass(PI / 6.0); // 30 degrees
+        assert!((value - 2.0).abs() < 0.05);
     }
 }
