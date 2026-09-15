@@ -1,4 +1,7 @@
-use observatory_core::{config_to_targets, parse_campaign_config, reduce_sequence, run_campaign};
+use observatory_core::{
+    build_campaign_report, config_to_targets, execute_campaign, parse_campaign_config,
+    reduce_sequence, run_campaign,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -42,12 +45,26 @@ fn main() {
         .collect::<Vec<_>>();
 
     let outcome = run_campaign(&targets, &reductions);
+    let execution = execute_campaign(&targets, &reductions);
+    let report = build_campaign_report(&execution);
 
     println!("campaign_name={}", config.name);
-    println!("campaign_ready={}", outcome.ready);
-    println!("target_count={}", outcome.target_count);
-    println!("valid_targets={}", outcome.valid_targets);
-    println!("total_sources={}", outcome.total_sources);
-    println!("total_flux={}", outcome.total_flux);
-    println!("average_flux={}", outcome.average_flux);
+    println!("campaign_ready={}", report.ready);
+    println!("target_count={}", report.target_count);
+    println!("valid_targets={}", report.valid_targets);
+    println!("total_sources={}", report.total_sources);
+    println!("total_flux={}", report.total_flux);
+    println!("average_flux={}", report.average_flux);
+    println!("summary_status={}", if report.ready { "ready" } else { "degraded" });
+
+    for (index, summary) in report.summaries.iter().enumerate() {
+        println!(
+            "summary[{index}]={}:valid={}:flux={}:successes={}",
+            summary.target_name, summary.valid, summary.total_flux, summary.successful_reductions
+        );
+    }
+
+    if !outcome.ready {
+        std::process::exit(1);
+    }
 }
