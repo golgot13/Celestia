@@ -67,6 +67,11 @@ pub use geo::{
 };
 pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};
+pub use lightcurve::{
+    analyze_light_curve, compute_differential_photometry, compute_lomb_scargle_periodogram,
+    light_curve_analysis_to_json, DifferentialMeasurement, LightCurveAnalysis, PeriodogramPeak,
+    PhotometricPoint,
+};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use photometry_calib::{

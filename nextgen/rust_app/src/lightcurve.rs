@@ -226,7 +226,6 @@ mod tests {
     #[test]
     fn detects_exact_periodic_variation_with_lomb_scargle() {
         let true_period = 2.5; // 2.5 days period
-        let amplitude = 0.25; // 0.25 mag variation
         let n = 50;
 
         let mut points = Vec::with_capacity(n);
