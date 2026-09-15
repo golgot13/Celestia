@@ -1,0 +1,9 @@
+{
+  "system_name": "HD 209458 b",
+  "planet_radius_ratio_k": 0.1208,
+  "impact_parameter_b": 0.5027,
+  "transit_depth_ppm": 14592.6,
+  "total_duration_hours_t14": 3.09,
+  "full_transit_duration_hours_t23": 2.22,
+  "is_transiting": true
+}

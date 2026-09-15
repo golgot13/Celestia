@@ -15,6 +15,7 @@ pub mod diagnostics;
 pub mod enclosure;
 pub mod ephemeris;
 pub mod execution;
+pub mod exoplanet;
 pub mod fits;
 pub mod focus;
 pub mod geo;
@@ -88,6 +89,11 @@ pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
 pub use config::{config_to_targets, parse_campaign_config, CampaignConfig, CampaignTargetConfig};
 pub use controller::{run_observation_cycle, ObservationControllerResult};
 pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
+pub use exoplanet::{
+    compute_mandel_agol_flux, compute_projected_separation, compute_transit_parameters,
+    fit_transit_depth_least_squares, generate_transit_light_curve, transit_parameters_to_json,
+    ExoplanetSystem, TransitFitResult, TransitLightCurvePoint, TransitParameters,
+};
 pub use fits::{
     create_astronomical_fits_image, write_fits_binary, FitsBitPix, FitsHeader, FitsHeaderCard,
     FitsImage,
