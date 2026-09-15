@@ -4,6 +4,7 @@ pub mod app;
 pub mod astro;
 pub mod astrometry;
 pub mod bench;
+pub mod broker;
 pub mod calibration;
 pub mod campaign;
 pub mod config;
@@ -54,6 +55,9 @@ pub use astrometry::{
     WorldCoord,
 };
 pub use bench::{run_ephemeris_benchmark, BenchmarkReport};
+pub use broker::{
+    AlertMessage, AlertSeverity, AlertTopic, ObservatoryEventBroker,
+};
 pub use calibration::{
     aperture_photometry, calibrate_frame, calibrate_frame_2d, apply_flat_field, subtract_bias,
     AperturePhotometry, CalibrationFrame, ReducedFrame,
