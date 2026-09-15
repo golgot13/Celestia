@@ -1,0 +1,13 @@
+{
+  "object_name": "2026-NEO-01",
+  "epoch_jd": 2459005.0000,
+  "semi_major_axis_au": 2.350714,
+  "eccentricity": 0.120197,
+  "inclination_deg": 8.5018,
+  "node_deg": 45.0131,
+  "periapsis_deg": 30.0308,
+  "mean_anomaly_deg": 11.3303,
+  "orbital_period_years": 3.6041,
+  "slant_ranges_au": [2.2625, 2.2227, 2.1828],
+  "converged": true
+}

@@ -21,6 +21,7 @@ pub mod focus;
 pub mod geo;
 pub mod guiding;
 pub mod instrument;
+pub mod iod;
 pub mod ledger;
 pub mod lightcurve;
 pub mod mosaic;
@@ -111,6 +112,10 @@ pub use guiding::{
     GuiderCorrection, GuiderLoop, GuiderSummary, PidAxisState, PidGains,
 };
 pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
+pub use iod::{
+    iod_result_to_json, solve_gauss_initial_orbit_determination,
+    state_vector_to_keplerian_elements, AstrometricObservation, IODResult,
+};
 pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};
 pub use lightcurve::{
     analyze_light_curve, compute_differential_photometry, compute_lomb_scargle_periodogram,
