@@ -14,6 +14,7 @@ pub mod ephemeris;
 pub mod execution;
 pub mod fits;
 pub mod geo;
+pub mod guiding;
 pub mod instrument;
 pub mod ledger;
 pub mod lightcurve;
@@ -69,6 +70,10 @@ pub use fits::{
 pub use geo::{
     compute_airmass, deg_to_rad, equatorial_to_horizontal, normalize_angle, rad_to_deg,
     GeographicCoord, HorizontalCoordinates,
+};
+pub use guiding::{
+    compute_dither_offset, compute_pid_pulse, compute_subpixel_centroid_1d, guider_summary_to_json,
+    GuiderCorrection, GuiderLoop, GuiderSummary, PidAxisState, PidGains,
 };
 pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};

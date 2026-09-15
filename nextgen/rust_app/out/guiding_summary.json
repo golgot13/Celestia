@@ -1,0 +1,7 @@
+{
+  "total_cycles": 15,
+  "rms_ra_arcsec": 0.1890,
+  "rms_dec_arcsec": 0.0971,
+  "total_rms_arcsec": 0.2125,
+  "tracking_stable": true
+}
