@@ -1511,16 +1511,16 @@ fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
         let u1 = (((seed >> 32) & 0xFFFF_FFFF) as f32) / 4294967295.0_f32;
         let u2 = (((seed >> 16) & 0xFFFF_FFFF) as f32) / 4294967295.0_f32;
 
+        // Deterministic spherical distribution on a shell of constant radius.
         let theta = 2.0 * PI * u0;
-        let cos_dec = 2.0 * u1 - 1.0;
-        let dec = cos_dec.clamp(-1.0, 1.0).asin();
-        let r = radius * (0.96 + 0.08 * u2);
+        let cos_theta = 2.0 * u1 - 1.0;
+        let sin_theta = (1.0 - cos_theta * cos_theta).sqrt();
 
-        let x = r * dec.cos() * theta.cos();
-        let y = r * dec.sin();
-        let z = r * dec.cos() * theta.sin();
+        let x = radius * sin_theta * theta.cos();
+        let y = radius * cos_theta;
+        let z = radius * sin_theta * theta.sin();
 
-        let luminance = 0.15 + 0.85 * (0.55 + 0.45 * u2);
+        let luminance = 0.15 + 0.85 * (0.45 + 0.55 * u2);
         stars.push(StarVertex {
             position: [x, y, z],
             luminance,
