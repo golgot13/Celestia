@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct CampaignConfig {
     pub name: String,
@@ -38,6 +36,28 @@ pub fn parse_campaign_config(text: &str) -> Result<CampaignConfig, String> {
             continue;
         }
 
+        if section == "target" && !line.contains('=') {
+            let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+            if parts.len() < 4 {
+                return Err(format!("invalid target row: '{raw_line}'"));
+            }
+
+            let target_name = parts[0];
+            let ra_deg = parts[1].parse::<f64>().map_err(|_| format!("invalid ra_deg in '{raw_line}'"))?;
+            let dec_deg = parts[2].parse::<f64>().map_err(|_| format!("invalid dec_deg in '{raw_line}'"))?;
+            let priority = parts[3].parse::<u8>().map_err(|_| format!("invalid priority in '{raw_line}'"))?;
+
+            if !target_name.is_empty() {
+                targets.push(CampaignTargetConfig {
+                    name: target_name.to_string(),
+                    ra_deg,
+                    dec_deg,
+                    priority,
+                });
+            }
+            continue;
+        }
+
         let Some((key, value)) = line.split_once('=') else {
             return Err(format!("invalid config line: '{raw_line}'"));
         };
@@ -53,22 +73,6 @@ pub fn parse_campaign_config(text: &str) -> Result<CampaignConfig, String> {
                 "flat_field" => flat_field = value.parse::<f64>().map_err(|_| format!("invalid flat_field: '{value}'"))?,
                 "threshold" => threshold = value.parse::<f64>().map_err(|_| format!("invalid threshold: '{value}'"))?,
                 _ => {}
-            },
-            "target" => {
-                let mut fields = value.split(',');
-                let target_name = fields.next().unwrap_or("").trim();
-                let ra_deg = fields.next().unwrap_or("0").trim().parse::<f64>().map_err(|_| format!("invalid ra_deg in '{value}'"))?;
-                let dec_deg = fields.next().unwrap_or("0").trim().parse::<f64>().map_err(|_| format!("invalid dec_deg in '{value}'"))?;
-                let priority = fields.next().unwrap_or("0").trim().parse::<u8>().map_err(|_| format!("invalid priority in '{value}'"))?;
-
-                if !target_name.is_empty() {
-                    targets.push(CampaignTargetConfig {
-                        name: target_name.to_string(),
-                        ra_deg,
-                        dec_deg,
-                        priority,
-                    });
-                }
             },
             _ => {
                 if key == "name" && name.is_empty() {

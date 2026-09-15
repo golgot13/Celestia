@@ -20,7 +20,7 @@ fn main() {
     let targets = config_to_targets(&config);
     let reductions = targets
         .iter()
-        .map(|target| reduce_sequence(observatory_core::ReductionRequest {
+        .map(|_target| reduce_sequence(observatory_core::ReductionRequest {
             width: 16,
             height: 16,
             image: (0..256)
