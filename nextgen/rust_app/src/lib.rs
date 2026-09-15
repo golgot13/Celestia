@@ -39,6 +39,7 @@ pub mod service;
 pub mod session;
 pub mod spectroscopy;
 pub mod stacking;
+pub mod transient;
 
 pub use abi::{
     AstroBatchHeader, AstroStatus, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
@@ -158,4 +159,8 @@ pub use spectroscopy::{
 };
 pub use stacking::{
     stack_frames_2d, stacked_result_to_json, StackedResult, StackingMethod, StackingParams,
+};
+pub use transient::{
+    compute_difference_image_2d, estimate_scale_factor_2d, transient_result_to_json,
+    SubtractionResult, TransientCandidate, TransientClassification,
 };

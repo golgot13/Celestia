@@ -1,0 +1,17 @@
+{
+  "width": 32,
+  "height": 32,
+  "background_rms": 0.0000,
+  "total_candidate_count": 1,
+  "candidates": [
+    {
+      "candidate_id": 1,
+      "x": 24.00,
+      "y": 22.00,
+      "peak_flux": 349.56,
+      "total_flux": 1437.82,
+      "significance_sigmas": 350000000.00,
+      "classification": "NewPointSource"
+    }
+  ]
+}
