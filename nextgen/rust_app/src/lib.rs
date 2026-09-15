@@ -21,6 +21,7 @@ pub mod ledger;
 pub mod lightcurve;
 pub mod nbody;
 pub mod observation;
+pub mod optics;
 pub mod orbit_elements;
 pub mod orchestrator;
 pub mod photometry_calib;
@@ -98,6 +99,11 @@ pub use nbody::{
     GRAVITATIONAL_CONSTANT, SPEED_OF_LIGHT,
 };
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
+pub use optics::{
+    analyze_optical_wavefront, evaluate_zernike_wavefront_opd, optical_wavefront_summary_to_json,
+    trace_pupil_spot_diagram, OpticalWavefrontSummary, SpotDiagramMetrics, SpotDiagramSample,
+    WavefrontAberrations,
+};
 pub use orbit_elements::{
     compute_apparent_ephemeris, orbital_elements_to_heliocentric_equatorial, solve_kepler_equation,
     target_ephemeris_to_json, KeplerianElements, TargetEphemeris,

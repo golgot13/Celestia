@@ -1,0 +1,10 @@
+{
+  "rms_wavefront_error_waves": 0.0349,
+  "peak_to_valley_waves": 0.1699,
+  "strehl_ratio": 0.9531,
+  "maréchal_diffraction_limited": true,
+  "dominant_aberration": "Spherical",
+  "rms_spot_radius_um": 1.750,
+  "airy_disk_radius_um": 3.355,
+  "is_diffraction_limited": true
+}
