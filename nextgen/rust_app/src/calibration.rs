@@ -21,6 +21,14 @@ pub struct AperturePhotometry {
     pub signal_to_noise: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourceDetection {
+    pub x: f64,
+    pub y: f64,
+    pub peak: f64,
+    pub flux: f64,
+}
+
 pub fn subtract_bias(frame: &[f64], bias: f64) -> Vec<f64> {
     frame.iter().map(|value| value - bias).collect()
 }
@@ -144,6 +152,79 @@ pub fn aperture_photometry(
     }
 }
 
+pub fn detect_sources(
+    frame: &[f64],
+    width: usize,
+    height: usize,
+    threshold: f64,
+    max_sources: usize,
+) -> Vec<SourceDetection> {
+    if frame.is_empty() || width == 0 || height == 0 || width * height != frame.len() || max_sources == 0 {
+        return Vec::new();
+    }
+
+    let mut max_idx = None;
+    let mut max_value = threshold;
+
+    for (idx, value) in frame.iter().enumerate() {
+        if *value > max_value {
+            max_value = *value;
+            max_idx = Some(idx);
+        }
+    }
+
+    let Some(peak_idx) = max_idx else {
+        return Vec::new();
+    };
+
+    let peak_x = peak_idx % width;
+    let peak_y = peak_idx / width;
+
+    let mut flux = 0.0_f64;
+    let mut weight_sum = 0.0_f64;
+    let mut numerator_x = 0.0_f64;
+    let mut numerator_y = 0.0_f64;
+    let mut peak = frame[peak_idx];
+
+    let y_start = peak_y.saturating_sub(2);
+    let y_end = (peak_y + 2).min(height.saturating_sub(1));
+    let x_start = peak_x.saturating_sub(2);
+    let x_end = (peak_x + 2).min(width.saturating_sub(1));
+
+    for yy in y_start..=y_end {
+        for xx in x_start..=x_end {
+            let idx = yy * width + xx;
+            let value = frame[idx];
+            if value <= threshold {
+                continue;
+            }
+
+            let residual = value - threshold;
+            flux += residual;
+            weight_sum += value;
+            numerator_x += xx as f64 * value;
+            numerator_y += yy as f64 * value;
+            if value > peak {
+                peak = value;
+            }
+        }
+    }
+
+    if flux <= 0.0 {
+        return Vec::new();
+    }
+
+    let centroid_x = numerator_x / weight_sum;
+    let centroid_y = numerator_y / weight_sum;
+
+    vec![SourceDetection {
+        x: centroid_x,
+        y: centroid_y,
+        peak,
+        flux,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +271,27 @@ mod tests {
         assert!(result.background_level >= 10.0);
         assert!(result.net_flux > 0.0);
         assert!(result.signal_to_noise > 0.0);
+    }
+
+    #[test]
+    fn detect_sources_finds_single_synthetic_star() {
+        let width = 11usize;
+        let height = 11usize;
+        let mut frame = vec![5.0; width * height];
+
+        for y in 0..height {
+            for x in 0..width {
+                let dx = x as f64 - 5.0;
+                let dy = y as f64 - 5.0;
+                let value = 100.0 * (-((dx * dx + dy * dy) / (2.0 * 1.8 * 1.8))).exp();
+                frame[y * width + x] = 5.0 + value;
+            }
+        }
+
+        let sources = detect_sources(&frame, width, height, 5.0, 1);
+        assert_eq!(sources.len(), 1);
+        assert!(sources[0].flux > 100.0);
+        assert!((sources[0].x - 5.0).abs() < 1.0);
+        assert!((sources[0].y - 5.0).abs() < 1.0);
     }
 }
