@@ -16,6 +16,7 @@ pub mod observation;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod reporting;
+pub mod runtime;
 pub mod sequence;
 pub mod session;
 
@@ -56,6 +57,7 @@ pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
 pub use reporting::{
     build_campaign_report, campaign_report_to_json, write_campaign_report_json, CampaignReport,
 };
+pub use runtime::{run_application_runtime, AppRuntimeResult, RuntimeState};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
 pub use session::{
     build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
