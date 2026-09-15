@@ -1,0 +1,24 @@
+report_written=report_from_cli.json
+{
+  "target_count": 2,
+  "valid_targets": 2,
+  "total_sources": 2,
+  "total_flux": 52.17697670003395,
+  "average_flux": 26.088488350016974,
+  "ready": true,
+  "summaries": [
+    {
+      "target_name": "M31",
+      "successful_reductions": 1,
+      "total_flux": 26.088488350016974,
+      "valid": true
+    },
+    {
+      "target_name": "M45",
+      "successful_reductions": 1,
+      "total_flux": 26.088488350016974,
+      "valid": true
+    }
+  ]
+}
+

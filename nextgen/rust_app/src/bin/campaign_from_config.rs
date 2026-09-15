@@ -3,26 +3,53 @@ use observatory_core::{
     reduce_sequence, run_campaign, write_campaign_report_json,
 };
 
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CliOptions {
+    output_path: Option<String>,
+    json_stdout: bool,
+    positional: Vec<String>,
+}
+
+fn parse_cli_args(args: &[String]) -> CliOptions {
+    let mut options = CliOptions::default();
+    let mut index = 0usize;
+
+    while index < args.len() {
+        let arg = &args[index];
+
+        match arg.as_str() {
+            "--output" => {
+                if index + 1 >= args.len() {
+                    eprintln!("missing value after --output");
+                    std::process::exit(1);
+                }
+                options.output_path = Some(args[index + 1].clone());
+                index += 2;
+            }
+            "--json" => {
+                options.json_stdout = true;
+                index += 1;
+            }
+            _ if arg.starts_with("--output=") => {
+                options.output_path = Some(arg.trim_start_matches("--output=").to_string());
+                index += 1;
+            }
+            _ => {
+                options.positional.push(arg.clone());
+                index += 1;
+            }
+        }
+    }
+
+    options
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut output_path: Option<String> = None;
-    let mut json_stdout = false;
-    let mut positional = Vec::new();
-
-    for arg in args {
-        if arg == "--output" {
-            continue;
-        }
-        if arg == "--json" {
-            json_stdout = true;
-            continue;
-        }
-        if arg.starts_with("--output=") {
-            output_path = Some(arg.trim_start_matches("--output=").to_string());
-            continue;
-        }
-        positional.push(arg);
-    }
+    let options = parse_cli_args(&args);
+    let output_path = options.output_path;
+    let json_stdout = options.json_stdout;
+    let positional = options.positional;
 
     let path = positional.first().cloned().unwrap_or_else(|| {
         eprintln!("Usage: campaign_from_config <config-file> [--output report.json] [--json]");
@@ -101,5 +128,25 @@ fn main() {
 
     if !outcome.ready {
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_cli_args;
+
+    #[test]
+    fn parse_cli_args_keeps_output_path_and_json_flag() {
+        let args = vec![
+            "sample.cfg".to_string(),
+            "--output".to_string(),
+            "report.json".to_string(),
+            "--json".to_string(),
+        ];
+
+        let parsed = parse_cli_args(&args);
+        assert_eq!(parsed.positional, vec!["sample.cfg".to_string()]);
+        assert_eq!(parsed.output_path, Some("report.json".to_string()));
+        assert!(parsed.json_stdout);
     }
 }
