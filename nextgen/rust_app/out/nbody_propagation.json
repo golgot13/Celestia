@@ -1,0 +1,34 @@
+{
+  "initial_time_s": 0.00,
+  "final_time_s": 31557600.00,
+  "step_count": 1461,
+  "initial_total_energy_j": -1.648083e35,
+  "final_total_energy_j": -1.648083e35,
+  "energy_relative_drift": 8.350874e-10,
+  "bodies": [
+    {
+      "name": "Sun",
+      "mass_kg": 1.9885e30,
+      "position_au": [-0.000121, 0.000700, 0.000000],
+      "velocity_km_s": [-0.0017, 0.0063, 0.0000]
+    },
+    {
+      "name": "Mercury",
+      "mass_kg": 3.3011e23,
+      "position_au": [0.223273, 0.316833, 0.000000],
+      "velocity_km_s": [-39.0982, 27.6336, 0.0000]
+    },
+    {
+      "name": "Earth",
+      "mass_kg": 5.9722e24,
+      "position_au": [0.999866, 0.000581, 0.000000],
+      "velocity_km_s": [0.0022, 29.7919, 0.0000]
+    },
+    {
+      "name": "Jupiter",
+      "mass_kg": 1.8981e27,
+      "position_au": [-2.627403, 4.492456, 0.000000],
+      "velocity_km_s": [-11.2698, -6.5919, 0.0000]
+    }
+  ]
+}
