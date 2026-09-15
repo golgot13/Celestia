@@ -1,0 +1,10 @@
+report_written=out\campaign_report.json
+session_written=out\session_summary.json
+{
+  "campaign_target_count": 2,
+  "total_priority": 8,
+  "sequence_total_exposure_s": 240,
+  "ready": true,
+  "sequence_valid": true,
+  "report_ready": true
+}
