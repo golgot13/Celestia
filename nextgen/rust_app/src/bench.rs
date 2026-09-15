@@ -25,6 +25,16 @@ pub struct BenchmarkThreshold {
     pub accepted: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BenchmarkSweepResult {
+    pub samples: usize,
+    pub scalar_ns: u128,
+    pub avx2_ns: u128,
+    pub speedup_ratio: f64,
+    pub max_abs_error: f64,
+    pub accepted: bool,
+}
+
 pub fn run_ephemeris_benchmark(sample_count: usize) -> BenchmarkReport {
     let cpu = detect_cpu_features();
     let samples: Vec<EphemerisSample> = (0..sample_count)
@@ -157,6 +167,25 @@ pub fn evaluate_ephemeris_benchmark_threshold(
     }
 }
 
+pub fn run_ephemeris_benchmark_suite() -> Vec<BenchmarkSweepResult> {
+    let sizes = [10_000usize, 100_000, 1_000_000];
+    let mut results = Vec::with_capacity(sizes.len());
+
+    for size in sizes {
+        let threshold = evaluate_ephemeris_benchmark_threshold(size, 1.0, 1e-9);
+        results.push(BenchmarkSweepResult {
+            samples: threshold.samples,
+            scalar_ns: threshold.scalar_ns,
+            avx2_ns: threshold.avx2_ns,
+            speedup_ratio: threshold.speedup_ratio,
+            max_abs_error: threshold.max_abs_error,
+            accepted: threshold.accepted,
+        });
+    }
+
+    results
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +211,16 @@ mod tests {
     fn benchmark_gate_rejects_tiny_debug_batches() {
         let threshold = evaluate_ephemeris_benchmark_threshold(1_000, 1.0, 1e-9);
         assert!(!threshold.accepted);
+    }
+
+    #[test]
+    fn benchmark_suite_reports_realistic_batch_progression() {
+        let suite = run_ephemeris_benchmark_suite();
+        assert_eq!(suite.len(), 3);
+        assert!(suite.iter().all(|entry| entry.samples > 0));
+
+        if !cfg!(debug_assertions) {
+            assert!(suite.iter().any(|entry| entry.accepted));
+        }
     }
 }
