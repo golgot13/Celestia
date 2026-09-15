@@ -1,0 +1,38 @@
+name: No Shortcuts Gate
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'nextgen/**'
+      - 'rust_app/**'
+      - 'asm/**'
+      - 'src-rs/**'
+      - 'scripts/quality/no_shortcuts_gate.ps1'
+      - '.github/workflows/no-shortcuts-gate.yml'
+  pull_request:
+    branches: [ master ]
+    paths:
+      - 'nextgen/**'
+      - 'rust_app/**'
+      - 'asm/**'
+      - 'src-rs/**'
+      - 'scripts/quality/no_shortcuts_gate.ps1'
+      - '.github/workflows/no-shortcuts-gate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  quality-gate:
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Run no-shortcuts gate
+        shell: pwsh
+        run: |
+          ./scripts/quality/no_shortcuts_gate.ps1
