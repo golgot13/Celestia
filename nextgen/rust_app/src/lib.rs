@@ -1,5 +1,6 @@
 pub mod abi;
 pub mod acquisition;
+pub mod app;
 pub mod astro;
 pub mod astrometry;
 pub mod bench;
@@ -25,6 +26,7 @@ pub use abi::{
     AstroBatchHeader, AstroStatus, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
     ASTRO_REQUIRED_CPU_FEATURES_AVX2,
 };
+pub use app::{build_application, ObservatoryApplication};
 pub use astro::{summarize_samples, MeasurementSummary};
 pub use astrometry::{
     pixel_to_world, solve_wcs_from_reference_points, world_to_pixel, PixelCoord, WcsTransform,
