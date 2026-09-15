@@ -2,7 +2,7 @@ use crate::{
     build_campaign, build_campaign_report, build_sequence, build_session_summary,
     config_to_targets, execute_campaign, initialize_instrument, initialize_mount,
     parse_campaign_config, plan_observation, reduce_sequence, start_capture,
-    write_campaign_report_json, write_session_summary_json, CaptureSession, CampaignTarget,
+    write_campaign_report_json, write_session_summary_json, CaptureSession,
     InstrumentConfig, ObservationMeta, SequenceStep,
 };
 
