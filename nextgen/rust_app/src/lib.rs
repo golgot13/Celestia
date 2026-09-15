@@ -9,10 +9,12 @@ pub mod campaign;
 pub mod config;
 pub mod controller;
 pub mod cpu;
+pub mod diagnostics;
 pub mod ephemeris;
 pub mod execution;
 pub mod geo;
 pub mod instrument;
+pub mod ledger;
 pub mod observation;
 pub mod orchestrator;
 pub mod pipeline;
@@ -38,6 +40,10 @@ pub use calibration::{
     AperturePhotometry, CalibrationFrame, ReducedFrame,
 };
 pub use cpu::{detect_cpu_features, CpuFeatureFlags};
+pub use diagnostics::{
+    diagnostic_report_to_json, evaluate_astrometry_residuals, evaluate_calibration_snr,
+    run_system_diagnostics, DiagnosticMetrics, SystemDiagnosticReport,
+};
 pub use ephemeris::{
     interpolate_ephemeris, interpolate_ephemeris_batch_avx2, mean_anomaly_from_jd,
     EphemerisSample, EphemerisState,
@@ -54,6 +60,7 @@ pub use geo::{
     GeographicCoord, HorizontalCoordinates,
 };
 pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
+pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};

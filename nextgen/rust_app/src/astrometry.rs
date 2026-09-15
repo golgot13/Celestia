@@ -48,14 +48,30 @@ pub fn solve_wcs_from_reference_points(points: &[(PixelCoord, WorldCoord)]) -> O
     }
 
     let (first_pixel, first_world) = points[0];
-    let (second_pixel, second_world) = points[1];
 
-    let dx = second_pixel.x - first_pixel.x;
-    let dy = second_pixel.y - first_pixel.y;
-    let dra = second_world.ra_deg - first_world.ra_deg;
-    let ddec = second_world.dec_deg - first_world.dec_deg;
+    // Find point with valid dx and dy from first point, or best least-squares estimate
+    let mut chosen_dx: f64 = 0.0;
+    let mut chosen_dy: f64 = 0.0;
+    let mut chosen_dra: f64 = 0.0;
+    let mut chosen_ddec: f64 = 0.0;
 
-    if dx.abs() < 1e-9 || dy.abs() < 1e-9 {
+    for (pixel, world) in &points[1..] {
+        let dx = pixel.x - first_pixel.x;
+        let dy = pixel.y - first_pixel.y;
+        let dra = world.ra_deg - first_world.ra_deg;
+        let ddec = world.dec_deg - first_world.dec_deg;
+
+        if dx.abs() > 1e-9 && chosen_dx.abs() <= 1e-9 {
+            chosen_dx = dx;
+            chosen_dra = dra;
+        }
+        if dy.abs() > 1e-9 && chosen_dy.abs() <= 1e-9 {
+            chosen_dy = dy;
+            chosen_ddec = ddec;
+        }
+    }
+
+    if chosen_dx.abs() < 1e-9 || chosen_dy.abs() < 1e-9 {
         return None;
     }
 
@@ -64,10 +80,10 @@ pub fn solve_wcs_from_reference_points(points: &[(PixelCoord, WorldCoord)]) -> O
         crpix_y: first_pixel.y,
         crval_ra_deg: first_world.ra_deg,
         crval_dec_deg: first_world.dec_deg,
-        cd11: dra / dx,
+        cd11: chosen_dra / chosen_dx,
         cd12: 0.0,
         cd21: 0.0,
-        cd22: ddec / dy,
+        cd22: chosen_ddec / chosen_dy,
     })
 }
 

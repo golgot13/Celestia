@@ -1,6 +1,6 @@
 use crate::{
-    AperturePhotometry, CpuFeatureFlags, ObservationControllerResult, ReducedFrame,
-    WcsTransform, WorldCoord, PixelCoord, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
+    AperturePhotometry, CpuFeatureFlags, ObservationControllerResult,
+    PixelCoord, WcsTransform, WorldCoord, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,7 +30,7 @@ pub fn evaluate_astrometry_residuals(
 
     let mut sum_sq = 0.0;
     for (pixel, expected_world) in reference_points {
-        let predicted_world = crate::pixel_to_world(wcs, pixel);
+        let predicted_world = crate::pixel_to_world(*wcs, *pixel);
         let dra = predicted_world.ra_deg - expected_world.ra_deg;
         let ddec = predicted_world.dec_deg - expected_world.dec_deg;
         sum_sq += dra * dra + ddec * ddec;
@@ -46,7 +46,7 @@ pub fn evaluate_calibration_snr(
         return 0.0;
     }
 
-    let total_snr: f64 = photometry.iter().map(|p| p.snr).sum();
+    let total_snr: f64 = photometry.iter().map(|p| p.signal_to_noise).sum();
     total_snr / photometry.len() as f64
 }
 
@@ -167,9 +167,9 @@ mod tests {
     #[test]
     fn runs_system_diagnostics_and_produces_healthy_report() {
         let cpu = CpuFeatureFlags {
+            x86_64: true,
+            sse2: true,
             avx2: true,
-            fma: true,
-            sse41: true,
         };
 
         let controller_result = ObservationControllerResult {

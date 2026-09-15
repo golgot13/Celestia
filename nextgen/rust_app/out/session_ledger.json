@@ -1,0 +1,46 @@
+{
+  "session_id": "OBS-DIAG-001",
+  "entry_count": 5,
+  "entries": [
+    {
+      "sequence_id": 1,
+      "event_type": "SessionStart",
+      "target_name": null,
+      "message": "Diagnostic session initiated",
+      "timestamp_ms": 100,
+      "checksum": 3138724790
+    },
+    {
+      "sequence_id": 2,
+      "event_type": "ConfigParsed",
+      "target_name": null,
+      "message": "Loaded config from sample_campaign.cfg",
+      "timestamp_ms": 120,
+      "checksum": 4202664318
+    },
+    {
+      "sequence_id": 3,
+      "event_type": "AstrometrySolved",
+      "target_name": null,
+      "message": "Astrometry status: ready=true",
+      "timestamp_ms": 250,
+      "checksum": 4030235171
+    },
+    {
+      "sequence_id": 4,
+      "event_type": "FrameCalibrated",
+      "target_name": null,
+      "message": "Calibration status: ready=true",
+      "timestamp_ms": 300,
+      "checksum": 3979717851
+    },
+    {
+      "sequence_id": 5,
+      "event_type": "SessionComplete",
+      "target_name": null,
+      "message": "Session outcome: ready=true",
+      "timestamp_ms": 400,
+      "checksum": 3266958193
+    }
+  ]
+}
