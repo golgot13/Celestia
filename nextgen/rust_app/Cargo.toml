@@ -1,0 +1,18 @@
+[package]
+name = "observatory_core"
+version = "0.1.0"
+edition = "2021"
+authors = ["Celestia project"]
+license = "GPL-3.0-or-later"
+
+[lib]
+name = "observatory_core"
+path = "src/lib.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
