@@ -1,0 +1,46 @@
+{
+  "total_events": 5,
+  "topics_count": 5,
+  "events": [
+    {
+      "id": 1,
+      "timestamp_ms": 100,
+      "topic": "weather/safety",
+      "severity": "Info",
+      "source": "meteorology_sensor",
+      "payload": "Sky transparency nominal, humidity 48%, wind 12 km/h"
+    },
+    {
+      "id": 2,
+      "timestamp_ms": 250,
+      "topic": "autofocus/v_curve",
+      "severity": "Info",
+      "source": "focus_engine",
+      "payload": "Autofocus sequence completed, optimal step=25045, min HFD=1.85 px"
+    },
+    {
+      "id": 3,
+      "timestamp_ms": 500,
+      "topic": "mount/meridian_flip",
+      "severity": "Warning",
+      "source": "mount_safety_guard",
+      "payload": "Target approaching meridian limit (HA=+5.2 deg). Auto-flip in 540s"
+    },
+    {
+      "id": 4,
+      "timestamp_ms": 750,
+      "topic": "science/transient",
+      "severity": "Critical",
+      "source": "subtraction_pipeline",
+      "payload": "Transient candidate discovered at (RA 10.6847, Dec 41.2687) with SNR 35.0 sigma"
+    },
+    {
+      "id": 5,
+      "timestamp_ms": 900,
+      "topic": "qc/frame_rejection",
+      "severity": "Warning",
+      "source": "frame_qc_engine",
+      "payload": "Frame #004 rejected: star roundness 0.58 below threshold (wind gust trail)"
+    }
+  ]
+}
