@@ -12,6 +12,7 @@ pub mod controller;
 pub mod cpu;
 pub mod deconvolution;
 pub mod diagnostics;
+pub mod enclosure;
 pub mod ephemeris;
 pub mod execution;
 pub mod fits;
