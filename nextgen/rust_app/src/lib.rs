@@ -13,6 +13,7 @@ pub mod diagnostics;
 pub mod ephemeris;
 pub mod execution;
 pub mod fits;
+pub mod focus;
 pub mod geo;
 pub mod guiding;
 pub mod instrument;
@@ -70,6 +71,10 @@ pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary}
 pub use fits::{
     create_astronomical_fits_image, write_fits_binary, FitsBitPix, FitsHeader, FitsHeaderCard,
     FitsImage,
+};
+pub use focus::{
+    compute_critical_focus_zone_steps, compute_half_flux_diameter, fit_parabolic_v_curve,
+    focus_curve_fit_to_json, plan_autofocus_run, AutofocusPlan, FocusCurveFit, FocuserMeasurement,
 };
 pub use geo::{
     compute_airmass, deg_to_rad, equatorial_to_horizontal, normalize_angle, rad_to_deg,
