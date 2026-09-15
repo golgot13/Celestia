@@ -1,12 +1,31 @@
 use observatory_core::{
     build_campaign_report, config_to_targets, execute_campaign, parse_campaign_config,
-    reduce_sequence, run_campaign,
+    reduce_sequence, run_campaign, write_campaign_report_json,
 };
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let path = args.first().cloned().unwrap_or_else(|| {
-        eprintln!("Usage: campaign_from_config <config-file>");
+    let mut output_path: Option<String> = None;
+    let mut json_stdout = false;
+    let mut positional = Vec::new();
+
+    for arg in args {
+        if arg == "--output" {
+            continue;
+        }
+        if arg == "--json" {
+            json_stdout = true;
+            continue;
+        }
+        if arg.starts_with("--output=") {
+            output_path = Some(arg.trim_start_matches("--output=").to_string());
+            continue;
+        }
+        positional.push(arg);
+    }
+
+    let path = positional.first().cloned().unwrap_or_else(|| {
+        eprintln!("Usage: campaign_from_config <config-file> [--output report.json] [--json]");
         std::process::exit(1);
     });
 
@@ -47,6 +66,22 @@ fn main() {
     let outcome = run_campaign(&targets, &reductions);
     let execution = execute_campaign(&targets, &reductions);
     let report = build_campaign_report(&execution);
+
+    if let Some(output) = output_path.as_ref() {
+        if let Err(error) = write_campaign_report_json(output, &report) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        println!("report_written={output}");
+    }
+
+    if json_stdout {
+        println!("{}", observatory_core::campaign_report_to_json(&report));
+        if !outcome.ready {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     println!("campaign_name={}", config.name);
     println!("campaign_ready={}", report.ready);

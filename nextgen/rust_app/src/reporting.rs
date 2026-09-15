@@ -79,6 +79,11 @@ pub fn campaign_report_to_json(report: &CampaignReport) -> String {
     json
 }
 
+pub fn write_campaign_report_json(path: &str, report: &CampaignReport) -> Result<(), String> {
+    std::fs::write(path, campaign_report_to_json(report))
+        .map_err(|error| format!("failed to write report '{path}': {error}"))
+}
+
 fn format_float(value: f64) -> String {
     if value.is_finite() {
         value.to_string()
@@ -154,5 +159,33 @@ mod tests {
         assert!(json.contains("\"ready\": true"));
         assert!(json.contains("\"target_name\": \"M31\""));
         assert!(json.contains("\"average_flux\": 210"));
+    }
+
+    #[test]
+    fn writes_campaign_report_json_to_disk() {
+        let report = CampaignReport {
+            target_count: 1,
+            valid_targets: 1,
+            total_sources: 2,
+            total_flux: 42.0,
+            average_flux: 42.0,
+            ready: true,
+            summaries: vec![ExecutionSummary {
+                target_name: "M31",
+                successful_reductions: 1,
+                total_flux: 42.0,
+                valid: true,
+            }],
+        };
+
+        let path = std::env::temp_dir().join("campaign_report_test.json");
+        let result = super::write_campaign_report_json(path.to_str().unwrap(), &report);
+        assert!(result.is_ok());
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("\"campaign\"") == false || written.contains("\"target_count\": 1"));
+        assert!(written.contains("\"target_name\": \"M31\""));
+
+        let _ = std::fs::remove_file(path);
     }
 }

@@ -16,6 +16,7 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod reporting;
 pub mod sequence;
+pub mod session;
 
 pub use abi::{
     AstroBatchHeader, AstroStatus, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
@@ -46,5 +47,10 @@ pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
-pub use reporting::{build_campaign_report, campaign_report_to_json, CampaignReport};
+pub use reporting::{
+    build_campaign_report, campaign_report_to_json, write_campaign_report_json, CampaignReport,
+};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
+pub use session::{
+    build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
+};
