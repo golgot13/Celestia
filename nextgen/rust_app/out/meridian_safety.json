@@ -1,0 +1,9 @@
+{
+  "current_ha_deg": 4.3153,
+  "current_pier_side": "West",
+  "target_pier_side": "East",
+  "flip_required": true,
+  "time_until_limit_seconds": 764.3,
+  "safety_status": "Safe",
+  "safe_to_expose_duration_s": 300.0
+}
