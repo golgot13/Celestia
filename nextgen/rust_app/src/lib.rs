@@ -24,6 +24,10 @@ pub use abi::{
     ASTRO_REQUIRED_CPU_FEATURES_AVX2,
 };
 pub use astro::{summarize_samples, MeasurementSummary};
+pub use astrometry::{
+    pixel_to_world, solve_wcs_from_reference_points, world_to_pixel, PixelCoord, WcsTransform,
+    WorldCoord,
+};
 pub use bench::{run_ephemeris_benchmark, BenchmarkReport};
 pub use calibration::{
     aperture_photometry, calibrate_frame, calibrate_frame_2d, apply_flat_field, subtract_bias,

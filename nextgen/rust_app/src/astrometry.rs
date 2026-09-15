@@ -42,6 +42,35 @@ pub fn pixel_to_world(transform: WcsTransform, pixel: PixelCoord) -> WorldCoord 
     WorldCoord { ra_deg, dec_deg }
 }
 
+pub fn solve_wcs_from_reference_points(points: &[(PixelCoord, WorldCoord)]) -> Option<WcsTransform> {
+    if points.len() < 2 {
+        return None;
+    }
+
+    let (first_pixel, first_world) = points[0];
+    let (second_pixel, second_world) = points[1];
+
+    let dx = second_pixel.x - first_pixel.x;
+    let dy = second_pixel.y - first_pixel.y;
+    let dra = second_world.ra_deg - first_world.ra_deg;
+    let ddec = second_world.dec_deg - first_world.dec_deg;
+
+    if dx.abs() < 1e-9 || dy.abs() < 1e-9 {
+        return None;
+    }
+
+    Some(WcsTransform {
+        crpix_x: first_pixel.x,
+        crpix_y: first_pixel.y,
+        crval_ra_deg: first_world.ra_deg,
+        crval_dec_deg: first_world.dec_deg,
+        cd11: dra / dx,
+        cd12: 0.0,
+        cd21: 0.0,
+        cd22: ddec / dy,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -82,5 +111,18 @@ mod tests {
         let recovered = pixel_to_world(wcs, pixel);
         assert!((recovered.ra_deg - world.ra_deg).abs() < 1e-6);
         assert!((recovered.dec_deg - world.dec_deg).abs() < 1e-6);
+    }
+
+    #[test]
+    fn solve_wcs_from_reference_points_builds_transform() {
+        let points = [
+            (PixelCoord { x: 100.0, y: 200.0 }, WorldCoord { ra_deg: 12.0, dec_deg: 45.0 }),
+            (PixelCoord { x: 150.0, y: 250.0 }, WorldCoord { ra_deg: 12.5, dec_deg: 45.5 }),
+        ];
+
+        let wcs = solve_wcs_from_reference_points(&points).unwrap();
+        let recovered = world_to_pixel(wcs, points[1].1);
+        assert!((recovered.x - points[1].0.x).abs() < 1e-6);
+        assert!((recovered.y - points[1].0.y).abs() < 1e-6);
     }
 }
