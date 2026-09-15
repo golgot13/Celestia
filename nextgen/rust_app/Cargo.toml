@@ -16,3 +16,13 @@ panic = "abort"
 lto = "thin"
 codegen-units = 1
 panic = "abort"
+
+[dependencies]
+bytemuck = { version = "1.18", features = ["derive"] }
+egui = "0.27"
+egui-wgpu = "0.27"
+egui-winit = "0.27"
+glam = "0.29"
+pollster = "0.4"
+wgpu = "0.19"
+winit = "0.29"
