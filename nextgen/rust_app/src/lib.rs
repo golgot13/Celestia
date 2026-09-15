@@ -4,11 +4,15 @@ pub mod astro;
 pub mod astrometry;
 pub mod bench;
 pub mod calibration;
+pub mod campaign;
 pub mod cpu;
 pub mod ephemeris;
+pub mod execution;
 pub mod geo;
 pub mod instrument;
 pub mod observation;
+pub mod pipeline;
+pub mod reporting;
 pub mod sequence;
 
 pub use abi::{
@@ -29,10 +33,14 @@ pub use ephemeris::{
 pub use acquisition::{
     initialize_mount, start_capture, CaptureResult, CaptureSession, MountState,
 };
+pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
+pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
 pub use geo::{
     compute_airmass, deg_to_rad, equatorial_to_horizontal, normalize_angle, rad_to_deg,
     GeographicCoord, HorizontalCoordinates,
 };
 pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
+pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
+pub use reporting::{build_campaign_report, CampaignReport};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
