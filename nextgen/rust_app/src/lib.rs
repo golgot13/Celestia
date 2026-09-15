@@ -17,8 +17,10 @@ pub mod instrument;
 pub mod ledger;
 pub mod observation;
 pub mod orchestrator;
+pub mod photometry_calib;
 pub mod pipeline;
 pub mod psf;
+pub mod qc;
 pub mod reporting;
 pub mod runtime;
 pub mod scheduler;
@@ -66,6 +68,11 @@ pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
+pub use photometry_calib::{
+    calibrate_target_magnitude, calibration_result_to_json, compute_instrumental_magnitude,
+    solve_zero_point_and_extinction, CalibratedStarMagnitude, ObservedStarPhotometry,
+    StandardStar, ZeroPointCalibration,
+};
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
 pub use psf::{
     assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,

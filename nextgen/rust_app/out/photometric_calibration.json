@@ -1,0 +1,8 @@
+{
+  "filter": "V",
+  "zero_point_mag": 21.0324,
+  "extinction_coefficient": 0.1500,
+  "residual_rms_mag": 0.0000,
+  "reference_star_count": 1,
+  "valid": true
+}

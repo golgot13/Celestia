@@ -67,20 +67,30 @@ fn stack_pixel_sigma_clip(
             break;
         }
 
+        // Mean and standard deviation
         let mean = current.iter().sum::<f64>() / current.len() as f64;
         let var = current
             .iter()
             .map(|&v| (v - mean).powi(2))
             .sum::<f64>()
             / (current.len() - 1) as f64;
-        let std_dev = var.sqrt();
+        let sample_std = var.sqrt();
 
-        if std_dev < 1e-12 {
+        // MAD (Median Absolute Deviation) for robust scale estimation
+        let mut sorted = current.clone();
+        let med = compute_median_inplace(&mut sorted);
+        let mut abs_devs: Vec<f64> = current.iter().map(|&v| (v - med).abs()).collect();
+        let mad = compute_median_inplace(&mut abs_devs);
+        let std_dev = if mad > 1e-12 {
+            1.4826 * mad
+        } else if sample_std > 1e-12 {
+            sample_std
+        } else {
             break;
-        }
+        };
 
-        let low_thresh = mean - low_sigma * std_dev;
-        let high_thresh = mean + high_sigma * std_dev;
+        let low_thresh = med - low_sigma * std_dev;
+        let high_thresh = med + high_sigma * std_dev;
 
         let filtered: Vec<f64> = current
             .iter()
@@ -189,17 +199,22 @@ mod tests {
         let height = 4;
         let signal = 100.0;
 
-        let mut f1 = vec![signal; 16];
-        let mut f2 = vec![signal; 16];
+        let f1 = vec![signal; 16];
+        let f2 = vec![signal; 16];
         let mut f3 = vec![signal; 16];
-        let mut f4 = vec![signal; 16];
-        let mut f5 = vec![signal; 16];
+        let f4 = vec![signal; 16];
+        let f5 = vec![signal; 16];
 
         // Cosmic ray outlier in frame 3 at pixel (2,2) -> index 10
         f3[10] = 50000.0;
 
         let frames = vec![f1, f2, f3, f4, f5];
-        let params = StackingParams::default();
+        let params = StackingParams {
+            method: StackingMethod::SigmaClipping,
+            sigma_clip_low: 2.0,
+            sigma_clip_high: 2.0,
+            max_iterations: 3,
+        };
 
         let result = stack_frames_2d(&frames, width, height, &params).unwrap();
         assert_eq!(result.frame_count, 5);
