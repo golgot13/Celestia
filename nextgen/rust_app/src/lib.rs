@@ -114,6 +114,11 @@ pub use platesolve::{
     blind_solver_result_to_json, extract_triangles, solve_blind_astrometry, AstrometricMatch,
     BlindSolverResult, CatalogSource, DetectedSource, TriangleAsterism,
 };
+pub use pointing::{
+    apply_pointing_correction, compute_true_atmospheric_refraction, pointing_model_to_json,
+    solve_pointing_model_least_squares, AtmosphericConditions, PointingCalibrationStar,
+    PointingModelTerms,
+};
 pub use psf::{
     assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,
     SeeingAssessment, StarProfileFit, StarProfileModel,
