@@ -18,6 +18,7 @@ pub mod guiding;
 pub mod instrument;
 pub mod ledger;
 pub mod lightcurve;
+pub mod nbody;
 pub mod observation;
 pub mod orchestrator;
 pub mod photometry_calib;
@@ -82,6 +83,11 @@ pub use lightcurve::{
     analyze_light_curve, compute_differential_photometry, compute_lomb_scargle_periodogram,
     light_curve_analysis_to_json, DifferentialMeasurement, LightCurveAnalysis, PeriodogramPeak,
     PhotometricPoint,
+};
+pub use nbody::{
+    compute_system_energy, nbody_report_to_json, propagate_nbody_system, step_nbody_symplectic_4th,
+    CelestialBody, IntegratorMethod, NBodyPropagationReport, SystemEnergy, ASTRONOMICAL_UNIT_M,
+    GRAVITATIONAL_CONSTANT, SPEED_OF_LIGHT,
 };
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
