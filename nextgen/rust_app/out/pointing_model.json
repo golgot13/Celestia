@@ -1,0 +1,10 @@
+{
+  "polar_elevation_error_arcsec": -1.80,
+  "polar_azimuth_error_arcsec": 0.00,
+  "non_perpendicularity_arcsec": -1.95,
+  "collimation_cone_error_arcsec": 1.49,
+  "tube_flexure_arcsec": 0.00,
+  "rms_residual_arcsec": 10.10,
+  "star_count": 4,
+  "converged": true
+}

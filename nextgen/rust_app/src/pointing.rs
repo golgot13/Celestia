@@ -85,8 +85,9 @@ pub fn apply_pointing_correction(
     // Geometric TPOINT analytical corrections for equatorial mount
     let sin_ha = ha_signed.sin();
     let cos_ha = ha_signed.cos();
-    let tan_dec = dec.tan();
+    let sin_dec = dec.sin();
     let cos_dec = dec.cos();
+    let tan_dec = dec.tan();
     let sin_lat = lat_rad.sin();
     let cos_lat = lat_rad.cos();
 
@@ -122,7 +123,7 @@ pub fn apply_pointing_correction(
 
 pub fn solve_pointing_model_least_squares(
     stars: &[PointingCalibrationStar],
-    conditions: &AtmosphericConditions,
+    _conditions: &AtmosphericConditions,
 ) -> Result<PointingModelTerms, String> {
     let n = stars.len();
     if n < 4 {
@@ -143,7 +144,7 @@ pub fn solve_pointing_model_least_squares(
         let cat_ra_rad = star.catalog_ra_deg.to_radians();
         let cat_dec_rad = star.catalog_dec_deg.to_radians();
         let lst_rad = star.lst_deg.to_radians();
-        let lat_rad = star.site_latitude_deg.to_radians();
+        let _lat_rad = star.site_latitude_deg.to_radians();
 
         let expected_ha_rad = (lst_rad - cat_ra_rad).rem_euclid(2.0 * PI);
         let measured_ha_rad = star.mount_hour_angle_deg.to_radians().rem_euclid(2.0 * PI);
