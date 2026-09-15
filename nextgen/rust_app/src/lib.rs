@@ -1,9 +1,16 @@
+pub mod abi;
 pub mod astro;
+pub mod bench;
 pub mod cpu;
 pub mod ephemeris;
 pub mod geo;
 
+pub use abi::{
+    AstroBatchHeader, AstroStatus, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
+    ASTRO_REQUIRED_CPU_FEATURES_AVX2,
+};
 pub use astro::{summarize_samples, MeasurementSummary};
+pub use bench::{run_ephemeris_benchmark, BenchmarkReport};
 pub use cpu::{detect_cpu_features, CpuFeatureFlags};
 pub use ephemeris::{
     interpolate_ephemeris, mean_anomaly_from_jd, EphemerisSample, EphemerisState,
