@@ -1,0 +1,10 @@
+{
+  "crpix_x": 100.0000,
+  "crpix_y": 200.0000,
+  "crval_ra_deg": 12.000000,
+  "crval_dec_deg": 45.000000,
+  "cd11": 0.010000,
+  "cd22": 0.010000,
+  "recovered_ra_deg": 12.000000,
+  "recovered_dec_deg": 45.000000
+}
