@@ -735,13 +735,13 @@ impl RenderState {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let star_vertices: Vec<StarVertex> = scene
-            .targets
-            .iter()
-            .map(|target| StarVertex {
+        let background_stars = generate_background_stars(600, 120.0);
+        let star_vertices: Vec<StarVertex> = background_stars
+            .into_iter()
+            .chain(scene.targets.iter().map(|target| StarVertex {
                 position: target.position,
                 luminance: target.luminance,
-            })
+            }))
             .collect();
 
         let star_vertex_buffer = create_vertex_buffer_with_fallback(
@@ -1500,6 +1500,36 @@ fn priority_to_luminance(priority: u8) -> f32 {
     0.30 + 0.70 * normalized
 }
 
+fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
+    let mut stars = Vec::with_capacity(count);
+
+    for index in 0..count {
+        let seed = (index as u64 + 1)
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let u0 = ((seed & 0xFFFF_FFFF) as f32) / 4294967295.0_f32;
+        let u1 = (((seed >> 32) & 0xFFFF_FFFF) as f32) / 4294967295.0_f32;
+        let u2 = (((seed >> 16) & 0xFFFF_FFFF) as f32) / 4294967295.0_f32;
+
+        let theta = 2.0 * PI * u0;
+        let cos_dec = 2.0 * u1 - 1.0;
+        let dec = cos_dec.clamp(-1.0, 1.0).asin();
+        let r = radius * (0.96 + 0.08 * u2);
+
+        let x = r * dec.cos() * theta.cos();
+        let y = r * dec.sin();
+        let z = r * dec.cos() * theta.sin();
+
+        let luminance = 0.15 + 0.85 * (0.55 + 0.45 * u2);
+        stars.push(StarVertex {
+            position: [x, y, z],
+            luminance,
+        });
+    }
+
+    stars
+}
+
 fn generate_uv_sphere(
     longitude_segments: u32,
     latitude_segments: u32,
@@ -1708,7 +1738,9 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cli_args, priority_to_luminance, ra_dec_to_cartesian};
+    use super::{
+        generate_background_stars, parse_cli_args, priority_to_luminance, ra_dec_to_cartesian,
+    };
     use observatory_core::CampaignTargetConfig;
 
     #[test]
@@ -1761,5 +1793,18 @@ mod tests {
         assert!((position[0] - 10.0).abs() < 1e-6);
         assert!(position[1].abs() < 1e-6);
         assert!(position[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn generate_background_stars_has_expected_density_and_radius() {
+        let field = generate_background_stars(256, 120.0);
+        assert_eq!(field.len(), 256);
+        for star in field {
+            let radius_sq = star.position[0] * star.position[0]
+                + star.position[1] * star.position[1]
+                + star.position[2] * star.position[2];
+            assert!((radius_sq - 120.0 * 120.0).abs() < 1.0);
+            assert!((star.luminance >= 0.15) && (star.luminance <= 1.0));
+        }
     }
 }
