@@ -20,6 +20,7 @@ pub mod orchestrator;
 pub mod pipeline;
 pub mod reporting;
 pub mod runtime;
+pub mod scheduler;
 pub mod sequence;
 pub mod service;
 pub mod session;
@@ -68,6 +69,10 @@ pub use reporting::{
     build_campaign_report, campaign_report_to_json, write_campaign_report_json, CampaignReport,
 };
 pub use runtime::{run_application_runtime, AppRuntimeResult, RuntimeState};
+pub use scheduler::{
+    compute_local_sidereal_time_rad, compute_target_visibility, schedule_observation_queue,
+    schedule_plan_to_json, SchedulePlan, ScheduledObservation, SiteLimits, TargetVisibility,
+};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
 pub use service::{execute_service, ServiceExecution, ServicePhase};
 pub use session::{
