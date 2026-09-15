@@ -7,6 +7,7 @@ pub mod bench;
 pub mod broker;
 pub mod calibration;
 pub mod campaign;
+pub mod catalog;
 pub mod config;
 pub mod controller;
 pub mod cpu;
@@ -45,6 +46,7 @@ pub mod service;
 pub mod session;
 pub mod spectroscopy;
 pub mod stacking;
+pub mod stellar;
 pub mod transient;
 
 pub use abi::{
@@ -64,6 +66,10 @@ pub use broker::{
 pub use calibration::{
     aperture_photometry, calibrate_frame, calibrate_frame_2d, apply_flat_field, subtract_bias,
     AperturePhotometry, CalibrationFrame, ReducedFrame,
+};
+pub use catalog::{
+    crossmatch_catalog, estimate_magnitude_limit_for_snr, propagate_catalog_position,
+    CatalogMatch, CatalogStar,
 };
 pub use cpu::{detect_cpu_features, CpuFeatureFlags};
 pub use deconvolution::{
@@ -190,6 +196,10 @@ pub use spectroscopy::{
 };
 pub use stacking::{
     stack_frames_2d, stacked_result_to_json, StackedResult, StackingMethod, StackingParams,
+};
+pub use stellar::{
+    classify_star_by_color_index, compute_distance_modulus_and_pc, estimate_stellar_temperature_k,
+    stellar_classification_to_json, PhotometricDistance, SpectralType, StellarClassification,
 };
 pub use transient::{
     compute_difference_image_2d, estimate_scale_factor_2d, transient_result_to_json,

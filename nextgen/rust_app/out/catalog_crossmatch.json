@@ -1,0 +1,6 @@
+{
+  "target_ra_deg": 10.6847,
+  "target_dec_deg": 41.2687,
+  "max_match_arcsec": 10.00,
+  "matches": [{"matched_id": "HIP 1086", "separation_arcsec": 1.412, "match_probability": 0.859}]
+}
