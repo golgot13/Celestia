@@ -221,7 +221,8 @@ pub fn compute_dome_azimuth_sync(
     let ix = ox + s * tx;
     let iy = oy + s * ty;
 
-    let required_dome_azimuth_deg = (iy.atan2(ix).to_degrees()).rem_euclid(360.0);
+    // Astronomical azimuth is measured from North (y) towards East (x)
+    let required_dome_azimuth_deg = (ix.atan2(iy).to_degrees()).rem_euclid(360.0);
     let angle_diff = ((required_dome_azimuth_deg - telescope_azimuth_deg + 180.0).rem_euclid(360.0) - 180.0).abs();
 
     let max_allowed_offset_deg = (geometry.slit_width_m / (2.0 * geometry.dome_radius_m)).asin().to_degrees();

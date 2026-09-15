@@ -1,0 +1,10 @@
+{
+  "dew_point_c": 6.36,
+  "dew_point_margin_c": 7.64,
+  "cloud_cover_delta_c": -39.00,
+  "weather_status": "SafeToOpen",
+  "enclosure_state": "Closed",
+  "can_open_shutter": true,
+  "safety_reasons": [
+  ]
+}
