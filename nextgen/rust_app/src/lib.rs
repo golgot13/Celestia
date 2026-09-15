@@ -15,6 +15,7 @@ pub mod execution;
 pub mod geo;
 pub mod instrument;
 pub mod ledger;
+pub mod lightcurve;
 pub mod observation;
 pub mod orchestrator;
 pub mod photometry_calib;

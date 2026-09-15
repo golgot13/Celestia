@@ -1,0 +1,9 @@
+{
+  "total_detected_stars": 3,
+  "median_fwhm_pixels": 2.3000,
+  "median_roundness": 0.9400,
+  "median_snr": 25.0000,
+  "background_level": 120.00,
+  "quality_flag": "Nominal",
+  "is_accepted": true
+}
