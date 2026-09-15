@@ -1,9 +1,9 @@
 use crate::{
     build_campaign, build_campaign_report, build_sequence, build_session_summary,
     config_to_targets, execute_campaign, initialize_instrument, initialize_mount,
-    parse_campaign_config, plan_observation, reduce_sequence, start_capture,
-    write_campaign_report_json, write_session_summary_json, CaptureSession,
-    InstrumentConfig, ObservationMeta, SequenceStep,
+    parse_campaign_config, plan_observation, reduce_sequence, solve_wcs_from_reference_points,
+    start_capture, write_campaign_report_json, write_session_summary_json, CaptureSession,
+    InstrumentConfig, ObservationMeta, PixelCoord, SequenceStep, WorldCoord,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -11,6 +11,7 @@ pub struct ObservationControllerResult {
     pub campaign_ready: bool,
     pub session_ready: bool,
     pub acquisition_ready: bool,
+    pub astrometry_ready: bool,
     pub report_ready: bool,
     pub report_path: Option<String>,
     pub session_path: Option<String>,
@@ -71,7 +72,25 @@ pub fn run_observation_cycle(
         .map(plan_observation)
         .collect::<Vec<_>>();
 
-    let acquisition_ready = mount.tracking && instrument.ready && instrument.exposure_ready && observations.iter().all(|obs| obs.usable);
+    let astrometry_points = targets
+        .iter()
+        .enumerate()
+        .map(|(index, target)| {
+            let pixel = PixelCoord {
+                x: 100.0 + index as f64 * 50.0,
+                y: 200.0 + index as f64 * 30.0,
+            };
+            let world = WorldCoord {
+                ra_deg: target.ra_deg,
+                dec_deg: target.dec_deg,
+            };
+            (pixel, world)
+        })
+        .collect::<Vec<_>>();
+    let astrometry_ready = solve_wcs_from_reference_points(&astrometry_points).is_some()
+        && astrometry_points.iter().all(|(_, world)| world.ra_deg.is_finite() && world.dec_deg.is_finite());
+
+    let acquisition_ready = mount.tracking && instrument.ready && instrument.exposure_ready && observations.iter().all(|obs| obs.usable) && astrometry_ready;
 
     let capture = start_capture(CaptureSession {
         target: targets[0].name,
@@ -130,10 +149,11 @@ pub fn run_observation_cycle(
         campaign_ready: campaign.ready,
         session_ready: session.ready,
         acquisition_ready,
+        astrometry_ready,
         report_ready: report.ready,
         report_path,
         session_path,
-        ready: campaign.ready && session.ready && acquisition_ready && report.ready && capture.sync_ok,
+        ready: campaign.ready && session.ready && acquisition_ready && astrometry_ready && report.ready && capture.sync_ok,
     };
 
     Ok(result)
@@ -163,6 +183,7 @@ M45,56.75,24.1167,3
         assert!(result.campaign_ready);
         assert!(result.session_ready);
         assert!(result.acquisition_ready);
+        assert!(result.astrometry_ready);
         assert!(result.report_ready);
     }
 }
