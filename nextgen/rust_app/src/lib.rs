@@ -18,6 +18,7 @@ pub mod pipeline;
 pub mod reporting;
 pub mod runtime;
 pub mod sequence;
+pub mod service;
 pub mod session;
 
 pub use abi::{
@@ -59,6 +60,7 @@ pub use reporting::{
 };
 pub use runtime::{run_application_runtime, AppRuntimeResult, RuntimeState};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
+pub use service::{execute_service, ServiceExecution, ServicePhase};
 pub use session::{
     build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
 };
