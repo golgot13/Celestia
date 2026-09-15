@@ -1,0 +1,10 @@
+{
+  "campaign_target_count": 2,
+  "total_priority": 8,
+  "sequence_total_exposure_s": 240,
+  "mount_tracking": true,
+  "instrument_ready": true,
+  "exposure_ready": true,
+  "capture_ok": true,
+  "ready": true
+}
