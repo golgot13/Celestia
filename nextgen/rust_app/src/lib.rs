@@ -22,6 +22,7 @@ pub mod observation;
 pub mod orchestrator;
 pub mod photometry_calib;
 pub mod pipeline;
+pub mod platesolve;
 pub mod psf;
 pub mod qc;
 pub mod reporting;
@@ -90,6 +91,10 @@ pub use photometry_calib::{
     StandardStar, ZeroPointCalibration,
 };
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
+pub use platesolve::{
+    blind_solver_result_to_json, extract_triangles, solve_blind_astrometry, AstrometricMatch,
+    BlindSolverResult, CatalogSource, DetectedSource, TriangleAsterism,
+};
 pub use psf::{
     assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,
     SeeingAssessment, StarProfileFit, StarProfileModel,
