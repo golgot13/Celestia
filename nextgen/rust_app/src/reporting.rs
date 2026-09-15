@@ -12,13 +12,28 @@ pub struct CampaignReport {
 }
 
 pub fn build_campaign_report(report: &CampaignExecutionReport) -> CampaignReport {
-    unimplemented!("campaign report not implemented yet")
+    let valid_targets = report.summaries.iter().filter(|summary| summary.valid).count();
+    let total_flux = report.summaries.iter().map(|summary| summary.total_flux).sum::<f64>();
+    let average_flux = if report.target_count == 0 {
+        0.0
+    } else {
+        total_flux / report.target_count as f64
+    };
+
+    CampaignReport {
+        target_count: report.target_count,
+        valid_targets,
+        total_sources: report.total_sources,
+        total_flux: report.total_flux,
+        average_flux,
+        ready: report.ready,
+        summaries: report.summaries.clone(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CampaignTarget, CampaignExecutionReport, ExecutionSummary, SequenceReductionResult};
 
     #[test]
     fn builds_summary_report_from_execution_report() {
