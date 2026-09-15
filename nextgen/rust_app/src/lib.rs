@@ -12,6 +12,7 @@ pub mod cpu;
 pub mod diagnostics;
 pub mod ephemeris;
 pub mod execution;
+pub mod fits;
 pub mod geo;
 pub mod instrument;
 pub mod ledger;
@@ -61,6 +62,10 @@ pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
 pub use config::{config_to_targets, parse_campaign_config, CampaignConfig, CampaignTargetConfig};
 pub use controller::{run_observation_cycle, ObservationControllerResult};
 pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
+pub use fits::{
+    create_astronomical_fits_image, write_fits_binary, FitsBitPix, FitsHeader, FitsHeaderCard,
+    FitsImage,
+};
 pub use geo::{
     compute_airmass, deg_to_rad, equatorial_to_horizontal, normalize_angle, rad_to_deg,
     GeographicCoord, HorizontalCoordinates,
