@@ -5,6 +5,7 @@ pub mod astrometry;
 pub mod bench;
 pub mod calibration;
 pub mod campaign;
+pub mod config;
 pub mod cpu;
 pub mod ephemeris;
 pub mod execution;
@@ -35,6 +36,7 @@ pub use acquisition::{
     initialize_mount, start_capture, CaptureResult, CaptureSession, MountState,
 };
 pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
+pub use config::{config_to_targets, parse_campaign_config, CampaignConfig, CampaignTargetConfig};
 pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
 pub use geo::{
     compute_airmass, deg_to_rad, equatorial_to_horizontal, normalize_angle, rad_to_deg,

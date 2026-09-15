@@ -1,4 +1,4 @@
-use crate::{CampaignExecutionReport, CampaignTarget, SequenceReductionResult};
+use crate::{CampaignTarget, SequenceReductionResult};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CampaignOutcome {
