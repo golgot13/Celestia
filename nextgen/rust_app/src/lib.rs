@@ -18,12 +18,14 @@ pub mod ledger;
 pub mod observation;
 pub mod orchestrator;
 pub mod pipeline;
+pub mod psf;
 pub mod reporting;
 pub mod runtime;
 pub mod scheduler;
 pub mod sequence;
 pub mod service;
 pub mod session;
+pub mod stacking;
 
 pub use abi::{
     AstroBatchHeader, AstroStatus, ASTRO_ABI_VERSION_MAJOR, ASTRO_ABI_VERSION_MINOR,
@@ -65,6 +67,10 @@ pub use ledger::{LedgerEntry, LedgerEventType, SessionLedger};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
+pub use psf::{
+    assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,
+    SeeingAssessment, StarProfileFit, StarProfileModel,
+};
 pub use reporting::{
     build_campaign_report, campaign_report_to_json, write_campaign_report_json, CampaignReport,
 };
