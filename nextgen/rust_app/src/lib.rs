@@ -72,6 +72,11 @@ pub use diagnostics::{
     diagnostic_report_to_json, evaluate_astrometry_residuals, evaluate_calibration_snr,
     run_system_diagnostics, DiagnosticMetrics, SystemDiagnosticReport,
 };
+pub use enclosure::{
+    compute_dew_point_c, compute_dome_azimuth_sync, enclosure_report_to_json,
+    evaluate_weather_safety, DomeSlitGeometry, DomeSlitPosition, EnclosureSafetyReport,
+    EnclosureState, WeatherLimits, WeatherSafetyStatus, WeatherTelemetry,
+};
 pub use ephemeris::{
     interpolate_ephemeris, interpolate_ephemeris_batch_avx2, mean_anomaly_from_jd,
     EphemerisSample, EphemerisState,
