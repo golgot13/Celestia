@@ -1,0 +1,43 @@
+{
+  "center_ra_deg": 10.684700,
+  "center_dec_deg": 41.268700,
+  "total_tiles": 4,
+  "total_width_arcmin": 111.00,
+  "total_height_arcmin": 74.00,
+  "total_area_sq_deg": 2.2817,
+  "overlap_percentage": 15.0,
+  "tiles": [
+    {
+      "tile_index": 1,
+      "row": 1,
+      "column": 1,
+      "center_ra_deg": 10.119258,
+      "center_dec_deg": 41.552033,
+      "offset_arcmin": [-25.50, 17.00]
+    },
+    {
+      "tile_index": 2,
+      "row": 1,
+      "column": 2,
+      "center_ra_deg": 11.250142,
+      "center_dec_deg": 41.552033,
+      "offset_arcmin": [25.50, 17.00]
+    },
+    {
+      "tile_index": 3,
+      "row": 2,
+      "column": 1,
+      "center_ra_deg": 10.119258,
+      "center_dec_deg": 40.985367,
+      "offset_arcmin": [-25.50, -17.00]
+    },
+    {
+      "tile_index": 4,
+      "row": 2,
+      "column": 2,
+      "center_ra_deg": 11.250142,
+      "center_dec_deg": 40.985367,
+      "offset_arcmin": [25.50, -17.00]
+    }
+  ]
+}

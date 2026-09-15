@@ -20,6 +20,7 @@ pub mod guiding;
 pub mod instrument;
 pub mod ledger;
 pub mod lightcurve;
+pub mod mosaic;
 pub mod nbody;
 pub mod observation;
 pub mod optics;
@@ -98,6 +99,9 @@ pub use lightcurve::{
     analyze_light_curve, compute_differential_photometry, compute_lomb_scargle_periodogram,
     light_curve_analysis_to_json, DifferentialMeasurement, LightCurveAnalysis, PeriodogramPeak,
     PhotometricPoint,
+};
+pub use mosaic::{
+    generate_mosaic_grid, mosaic_plan_to_json, MosaicGridConfig, MosaicPlan, MosaicTile,
 };
 pub use nbody::{
     compute_system_energy, nbody_report_to_json, propagate_nbody_system, step_nbody_symplectic_4th,
