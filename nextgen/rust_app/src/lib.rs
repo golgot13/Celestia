@@ -78,6 +78,10 @@ pub use psf::{
     assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,
     SeeingAssessment, StarProfileFit, StarProfileModel,
 };
+pub use qc::{
+    evaluate_frame_quality, frame_quality_to_json, FrameQualitySummary, QcThresholds, QualityFlag,
+    StarMeasurement,
+};
 pub use reporting::{
     build_campaign_report, campaign_report_to_json, write_campaign_report_json, CampaignReport,
 };
