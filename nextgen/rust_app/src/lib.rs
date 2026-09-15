@@ -26,6 +26,7 @@ pub mod orchestrator;
 pub mod photometry_calib;
 pub mod pipeline;
 pub mod platesolve;
+pub mod pointing;
 pub mod psf;
 pub mod qc;
 pub mod reporting;
