@@ -20,6 +20,7 @@ pub mod ledger;
 pub mod lightcurve;
 pub mod nbody;
 pub mod observation;
+pub mod orbit_elements;
 pub mod orchestrator;
 pub mod photometry_calib;
 pub mod pipeline;
@@ -91,6 +92,11 @@ pub use nbody::{
     GRAVITATIONAL_CONSTANT, SPEED_OF_LIGHT,
 };
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
+pub use orbit_elements::{
+    compute_apparent_ephemeris, orbital_elements_to_heliocentric_equatorial, solve_kepler_equation,
+    target_ephemeris_to_json, KeplerianElements, TargetEphemeris,
+    GAUSSIAN_GRAVITATIONAL_CONSTANT_K, J2000_OBLIQUITY_RAD,
+};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use photometry_calib::{
     calibrate_target_magnitude, calibration_result_to_json, compute_instrumental_magnitude,

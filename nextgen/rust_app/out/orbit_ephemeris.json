@@ -1,0 +1,12 @@
+{
+  "name": "Ceres",
+  "target_jd": 2459000.5000,
+  "ra_deg": 223.603899,
+  "dec_deg": -13.509482,
+  "heliocentric_distance_au": 2.736611,
+  "geocentric_distance_au": 3.346963,
+  "phase_angle_deg": 15.0395,
+  "apparent_magnitude_v": 9.02,
+  "proper_motion_ra_arcsec_hr": 23.7354,
+  "proper_motion_dec_arcsec_hr": -11.5729
+}
