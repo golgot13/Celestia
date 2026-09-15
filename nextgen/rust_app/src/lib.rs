@@ -84,3 +84,6 @@ pub use service::{execute_service, ServiceExecution, ServicePhase};
 pub use session::{
     build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
 };
+pub use stacking::{
+    stack_frames_2d, stacked_result_to_json, StackedResult, StackingMethod, StackingParams,
+};
