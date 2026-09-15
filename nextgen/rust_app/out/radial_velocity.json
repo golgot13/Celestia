@@ -1,0 +1,8 @@
+{
+  "line_name": "H-Alpha",
+  "rest_wavelength_angstrom": 6562.8100,
+  "observed_wavelength_angstrom": 6489.7409,
+  "doppler_shift_angstrom": -73.0691,
+  "radial_velocity_km_s": -3337.83,
+  "redshift_z": -0.011134
+}

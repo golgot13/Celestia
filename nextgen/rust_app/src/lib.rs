@@ -32,6 +32,7 @@ pub mod scheduler;
 pub mod sequence;
 pub mod service;
 pub mod session;
+pub mod spectroscopy;
 pub mod stacking;
 
 pub use abi::{
@@ -121,6 +122,11 @@ pub use sequence::{build_sequence, SequencePlan, SequenceStep};
 pub use service::{execute_service, ServiceExecution, ServicePhase};
 pub use session::{
     build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
+};
+pub use spectroscopy::{
+    compute_doppler_radial_velocity, evaluate_wavelength_at_pixel, extract_1d_spectrum_from_2d,
+    radial_velocity_to_json, solve_dispersion_polynomial, DispersionSolution, ExtractedSpectrum,
+    LampEmissionLine, RadialVelocityMeasurement, SpectralLine, H_ALPHA, H_BETA, NA_D1, NA_D2,
 };
 pub use stacking::{
     stack_frames_2d, stacked_result_to_json, StackedResult, StackingMethod, StackingParams,
