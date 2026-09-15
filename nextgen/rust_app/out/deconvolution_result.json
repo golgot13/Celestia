@@ -1,0 +1,8 @@
+{
+  "width": 32,
+  "height": 32,
+  "iterations_completed": 15,
+  "flux_conservation_ratio": 0.999998,
+  "final_residual_rms": 1.050498,
+  "contrast_improvement_ratio": 2.5841
+}

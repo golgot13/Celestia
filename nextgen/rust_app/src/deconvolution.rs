@@ -148,7 +148,7 @@ pub fn richardson_lucy_deconvolve_2d(
         for i in 0..total_pixels {
             let mut new_val = estimate[i] * correction[i];
             if params.regularization_factor > 0.0 {
-                new_val /= (1.0 + params.regularization_factor * (correction[i] - 1.0).abs());
+                new_val /= 1.0 + params.regularization_factor * (correction[i] - 1.0).abs();
             }
             if params.positivity_constraint {
                 new_val = new_val.max(1e-6);

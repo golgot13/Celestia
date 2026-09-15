@@ -9,6 +9,7 @@ pub mod campaign;
 pub mod config;
 pub mod controller;
 pub mod cpu;
+pub mod deconvolution;
 pub mod diagnostics;
 pub mod ephemeris;
 pub mod execution;
@@ -55,6 +56,10 @@ pub use calibration::{
     AperturePhotometry, CalibrationFrame, ReducedFrame,
 };
 pub use cpu::{detect_cpu_features, CpuFeatureFlags};
+pub use deconvolution::{
+    convolve_2d_separable, deconvolution_result_to_json, generate_gaussian_kernel_1d,
+    richardson_lucy_deconvolve_2d, DeconvolutionMethod, DeconvolutionParams, DeconvolutionResult,
+};
 pub use diagnostics::{
     diagnostic_report_to_json, evaluate_astrometry_residuals, evaluate_calibration_snr,
     run_system_diagnostics, DiagnosticMetrics, SystemDiagnosticReport,
