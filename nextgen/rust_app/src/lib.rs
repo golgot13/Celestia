@@ -46,5 +46,5 @@ pub use instrument::{initialize_instrument, InstrumentConfig, InstrumentStatus};
 pub use observation::{plan_observation, ObservationMeta, ObservationPlan};
 pub use orchestrator::{run_campaign, CampaignOutcome};
 pub use pipeline::{reduce_sequence, ReductionRequest, SequenceReductionResult};
-pub use reporting::{build_campaign_report, CampaignReport};
+pub use reporting::{build_campaign_report, campaign_report_to_json, CampaignReport};
 pub use sequence::{build_sequence, SequencePlan, SequenceStep};
