@@ -60,15 +60,16 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let h = normalize(l + v);
 
     let ndotl = max(dot(n, l), 0.0);
-    let diffuse = 0.10 + 0.90 * ndotl;
+    let ndotv = max(dot(n, v), 0.0);
+    let diffuse = 0.12 + 0.88 * ndotl;
 
     let spec_angle = max(dot(n, h), 0.0);
     let specular = pow(spec_angle, frame.specular_power) * frame.specular_strength;
+    let fresnel = pow(1.0 - ndotv, 3.2) * (0.55 + 0.45 * frame.atmosphere_strength);
+    let scattering = pow(ndotl, 5.0) * (0.18 + 0.82 * frame.atmosphere_strength);
 
-    let rim = pow(1.0 - max(dot(n, v), 0.0), 2.7) * frame.atmosphere_strength;
-
-    let base = frame.planet_color.rgb * diffuse;
-    let atmosphere = frame.atmosphere_color.rgb * rim;
+    let base = frame.planet_color.rgb * (0.45 + 0.55 * diffuse);
+    let atmosphere = frame.atmosphere_color.rgb * (fresnel + scattering);
 
     let color = base + atmosphere + vec3<f32>(specular, specular, specular);
     return vec4<f32>(color, 1.0);
@@ -1673,15 +1674,15 @@ fn atmospheric_palette(atmosphere_strength: f32, light_tilt: f32) -> ([f32; 4], 
     let dawn_glow = (1.0 - (light_tilt - 0.65).abs() / 0.65).clamp(0.0, 1.0);
 
     let planet = [
-        0.10 + 0.12 * day_mix + 0.08 * dawn_glow,
-        0.22 + 0.26 * day_mix + 0.12 * dawn_glow,
-        0.42 + 0.38 * day_mix + 0.22 * dawn_glow,
+        0.09 + 0.12 * day_mix + 0.08 * dawn_glow,
+        0.18 + 0.30 * day_mix + 0.12 * dawn_glow,
+        0.36 + 0.42 * day_mix + 0.18 * dawn_glow,
         1.0,
     ];
     let atmosphere = [
-        0.18 + 0.46 * glow + 0.22 * dawn_glow,
-        0.28 + 0.54 * glow + 0.20 * dawn_glow,
-        0.68 + 0.26 * glow + 0.18 * dawn_glow,
+        0.16 + 0.48 * glow + 0.20 * dawn_glow,
+        0.30 + 0.50 * glow + 0.24 * dawn_glow,
+        0.72 + 0.22 * glow + 0.12 * dawn_glow,
         1.0,
     ];
 
@@ -1693,12 +1694,17 @@ fn sky_background_color(elevation: f32, time_of_day: f32) -> [f32; 3] {
     let daylight = (0.5 + 0.5 * (time_of_day * 0.1).sin()).clamp(0.1, 1.0);
     let zenith_factor = (norm + 1.0) * 0.5;
     let horizon_factor = (1.0 - zenith_factor).max(0.0);
-    let contrast_boost = 0.22 + 0.38 * zenith_factor;
+    let solar_altitude = (time_of_day * 0.12).sin().clamp(-1.0, 1.0);
+    let twilight = (1.0 - solar_altitude.abs()).clamp(0.0, 1.0);
+
+    let rayleigh = 0.09 + 0.36 * daylight + 0.18 * zenith_factor;
+    let ozone = 0.04 + 0.28 * daylight + 0.10 * twilight;
+    let haze = 0.06 + 0.22 * horizon_factor;
 
     [
-        0.01 + 0.04 * daylight + contrast_boost * 0.85 - 0.08 * horizon_factor,
-        0.02 + 0.05 * daylight + contrast_boost * 0.92 - 0.10 * horizon_factor,
-        0.05 + 0.10 * daylight + contrast_boost * 1.12 + 0.14 * horizon_factor,
+        0.01 + rayleigh + 0.12 * zenith_factor - haze,
+        0.02 + 0.95 * rayleigh + 0.18 * zenith_factor - 0.15 * horizon_factor,
+        0.05 + 1.35 * rayleigh + ozone + 0.22 * zenith_factor + 0.18 * horizon_factor,
     ]
 }
 
@@ -1710,9 +1716,9 @@ fn tone_map_color(value: [f32; 3]) -> [f32; 3] {
         value[2] * exposure,
     ];
     let gamma = [
-        mapped[0].powf(0.85),
-        mapped[1].powf(0.85),
-        mapped[2].powf(0.85),
+        mapped[0].powf(0.82),
+        mapped[1].powf(0.82),
+        mapped[2].powf(0.82),
     ];
 
     [
