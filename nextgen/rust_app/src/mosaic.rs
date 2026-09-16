@@ -172,9 +172,9 @@ pub fn mosaic_plan_to_json(plan: &MosaicPlan) -> String {
         json.push_str(&format!("{:.2}, {:.2}", t.offset_from_center_arcmin.0, t.offset_from_center_arcmin.1));
         json.push_str("]\n    }");
         if i + 1 < plan.tiles.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

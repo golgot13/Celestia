@@ -73,7 +73,7 @@ unsafe fn interpolate_ephemeris_batch_avx2_inner(
     let sample_a_dec = _mm256_set1_pd(sample_a.declination_rad);
     let span_v = _mm256_set1_pd(span);
 
-    for (index, chunk) in target_jd.chunks_exact(4).enumerate() {
+    for (index, chunk) in target_jd.as_chunks::<4>().0.iter().enumerate() {
         let jd_v = _mm256_loadu_pd(chunk.as_ptr());
         let offset = _mm256_sub_pd(jd_v, sample_a_jd);
         let t = _mm256_div_pd(offset, span_v);

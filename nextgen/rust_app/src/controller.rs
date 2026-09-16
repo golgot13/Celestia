@@ -137,9 +137,9 @@ pub fn run_observation_cycle(
         let session_file = path.join("session_summary.json");
 
         write_campaign_report_json(report_file.to_str().unwrap(), &report)
-            .map_err(|error| format!("{error}"))?;
+            .map_err(|error| error.to_string())?;
         write_session_summary_json(session_file.to_str().unwrap(), &session)
-            .map_err(|error| format!("{error}"))?;
+            .map_err(|error| error.to_string())?;
 
         report_path = Some(report_file.to_string_lossy().into_owned());
         session_path = Some(session_file.to_string_lossy().into_owned());

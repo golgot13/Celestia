@@ -134,11 +134,11 @@ pub fn diagnostic_report_to_json(report: &SystemDiagnosticReport) -> String {
     for (index, log) in report.diagnostic_log.iter().enumerate() {
         json.push_str("    \"");
         json.push_str(log);
-        json.push_str("\"");
+        json.push('"');
         if index + 1 < report.diagnostic_log.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

@@ -124,9 +124,9 @@ impl ObservatoryEventBroker {
             json.push_str(&e.payload.replace('"', "\\\""));
             json.push_str("\"\n    }");
             if i + 1 < self.events.len() {
-                json.push_str(",");
+                json.push(',');
             }
-            json.push_str("\n");
+            json.push('\n');
         }
 
         json.push_str("  ]\n");

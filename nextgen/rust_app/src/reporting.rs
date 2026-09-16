@@ -69,9 +69,9 @@ pub fn campaign_report_to_json(report: &CampaignReport) -> String {
         json.push_str(if summary.valid { "true" } else { "false" });
         json.push_str("\n    }");
         if index + 1 < report.summaries.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

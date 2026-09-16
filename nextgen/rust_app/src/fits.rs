@@ -28,6 +28,12 @@ pub struct FitsImage {
     pub data: Vec<f64>,
 }
 
+impl Default for FitsHeader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FitsHeader {
     pub fn new() -> Self {
         Self { cards: Vec::new() }
@@ -206,7 +212,7 @@ pub fn write_fits_binary(image: &FitsImage, output_path: &str) -> Result<usize, 
     let header_rem = buffer.len() % 2880;
     if header_rem != 0 {
         let pad_len = 2880 - header_rem;
-        buffer.extend(std::iter::repeat(b' ').take(pad_len));
+        buffer.extend(std::iter::repeat_n(b' ', pad_len));
     }
 
     // 2. Write Data Block in Big-Endian Double Floating Point (FITS standard)
@@ -218,7 +224,7 @@ pub fn write_fits_binary(image: &FitsImage, output_path: &str) -> Result<usize, 
     let data_rem = (image.data.len() * 8) % 2880;
     if data_rem != 0 {
         let pad_len = 2880 - data_rem;
-        buffer.extend(std::iter::repeat(0u8).take(pad_len));
+        buffer.extend(std::iter::repeat_n(0u8, pad_len));
     }
 
     let total_written = buffer.len();

@@ -264,9 +264,9 @@ pub fn nbody_report_to_json(report: &NBodyPropagationReport) -> String {
         ));
         json.push_str("]\n    }");
         if i + 1 < report.bodies.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

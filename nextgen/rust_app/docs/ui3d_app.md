@@ -57,11 +57,10 @@ l'espace d'exploitation scientifique; il peut etre change a chaud dans l'interfa
 - `--output-dir <path>`: dossier de sortie runtime
 - `--width <px>` / `--height <px>`: taille de fenetre
 - `--fov <deg>`: champ de vision camera
-- `--near <value>` / `--far <value>`: plans de clipping
-- `--planet-radius <value>`: rayon de planete
-- `--star-radius <value>`: rayon de la coquille d'etoiles
-- `--rotation-speed <deg/s>`: vitesse de rotation de planete
-- `--atmosphere <value>`: intensite du halo atmosphere
+- `--near <value>` / `--far <value>`: plans de clipping, en unites astronomiques
+- `--star-radius <value>`: rayon de la coquille d'etoiles, en unites astronomiques
+- `--display-exposure <value>`: exposition du mappage tonal d'affichage
+- `--time-scale <facteur>`: acceleration du temps simule, 1 = temps reel
 - `--no-guides`: desactive les lignes de guidage
 
 ## Controles interactifs
@@ -69,21 +68,31 @@ l'espace d'exploitation scientifique; il peut etre change a chaud dans l'interfa
 - souris gauche + drag: orbite camera
 - molette ou `Q`/`E`: zoom
 - `W`/`A`/`S`/`D` ou fleches: orbite camera
-- `Space`: pause/reprise animation
+- `Space`: fige ou relance le temps simule
 - `G`: affiche/cache les lignes de guidage
-- `[` et `]`: diminue/augmente la vitesse de rotation
-- `-` et `+`: diminue/augmente l'atmosphere
+- `[` et `]`: diminue/augmente l'acceleration du temps
+- `-` et `+`: diminue/augmente l'exposition d'affichage
 - `R`: reset camera
 - `H`: affiche les controles dans le terminal
 
-## Rendu immersif implemente
+## Moteur 3D: modele physique
 
-- sphere planetaire haute resolution
-- eclairage dynamique (diffus + speculaire)
-- halo atmosphere (rim lighting)
-- champ d'etoiles issu des cibles de campagne
-- scintillation douce des etoiles
-- panneau egui temps reel pour controle direct
+- profondeur inversee (near -> 1, far -> 0) pour conserver la precision du tampon de
+  profondeur de 1e-6 ua a plusieurs centaines d'unites astronomiques
+- positions kepleriennes des planetes et planetes mineures a partir des elements J2000,
+  satellites resolus dans le plan de reference de leur corps parent
+- orientation des corps par les elements rotationnels seculaires de l'IAU/WGCCRE
+  (direction du pole alpha0/delta0 et meridien origine W), sans les termes periodiques
+- aplatissement geometrique applique selon l'axe de rotation, avec matrice de normales
+  correspondante
+- eclairement solaire en 1/r^2, reflectance lambertienne ponderee par l'albedo
+  geometrique mesure, mappage tonal de Reinhard a l'affichage
+- photosphere solaire avec assombrissement centre-bord lineaire (u = 0.6)
+- diffusion atmospherique simple avec fonction de phase de Rayleigh et epaisseur
+  optique en 1/cos, coquille dimensionnee sur la hauteur d'echelle reelle
+- anneaux de Jupiter, Saturne, Uranus et Neptune aux rayons publies, avec modele de
+  diffusion simple dans une couche d'epaisseur optique donnee
+- les corps sans carte de surface publiee (Soleil, satellites, planetes mineures) sont
+  rendus par relief procedural; l'interface le signale explicitement
 
-Les raccourcis camera s'appliquent a l'espace simulateur; le rendu 3D n'est soumis au
-GPU que lorsque cet espace est actif.
+Le rendu 3D n'est soumis au GPU que lorsque l'espace simulateur est actif.

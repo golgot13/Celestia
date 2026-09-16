@@ -4,6 +4,7 @@ pub mod app;
 pub mod astro;
 pub mod astrometry;
 pub mod bench;
+pub mod bodies;
 pub mod broker;
 pub mod calibration;
 pub mod campaign;
@@ -36,6 +37,7 @@ pub mod photometry_calib;
 pub mod pipeline;
 pub mod platesolve;
 pub mod pointing;
+pub mod ppm;
 pub mod psf;
 pub mod qc;
 pub mod reporting;
@@ -48,7 +50,9 @@ pub mod session;
 pub mod skymap;
 pub mod spectroscopy;
 pub mod stacking;
+pub mod starcatalog;
 pub mod stellar;
+pub mod tabular;
 pub mod transient;
 
 pub use abi::{
@@ -62,6 +66,14 @@ pub use astrometry::{
     WorldCoord,
 };
 pub use bench::{run_ephemeris_benchmark, BenchmarkReport};
+pub use bodies::{
+    compute_catalogue_positions_au, evaluate_body_orientation, heliocentric_position_au,
+    orbital_plane_position, plane_basis_from_normal, pole_direction_ecliptic, satellite_offset_au,
+    solar_system_catalogue, solve_eccentric_anomaly, BodyClass, BodyOrientation,
+    HeliocentricOrbit, IauRotationElements, OrbitModel, ReferencePlane, RingGeometry,
+    RotationModel, SatelliteOrbit, SolarSystemBody, ASTRONOMICAL_UNIT_KM, J2000_EPOCH_JD,
+    JULIAN_CENTURY_DAYS,
+};
 pub use broker::{
     AlertMessage, AlertSeverity, AlertTopic, ObservatoryEventBroker,
 };
@@ -170,6 +182,7 @@ pub use pointing::{
     solve_pointing_model_least_squares, AtmosphericConditions, PointingCalibrationStar,
     PointingModelTerms,
 };
+pub use ppm::{parse_ppm_rgb, read_ppm_file, PpmImage};
 pub use psf::{
     assess_seeing_quality, fit_gaussian_profile_1d, fit_moffat_profile_1d, seeing_assessment_to_json,
     SeeingAssessment, StarProfileFit, StarProfileModel,
@@ -209,10 +222,18 @@ pub use spectroscopy::{
 pub use stacking::{
     stack_frames_2d, stacked_result_to_json, StackedResult, StackingMethod, StackingParams,
 };
+pub use starcatalog::{
+    absolute_magnitude, angular_separation_deg, apparent_magnitude, b_v_from_spectral_type,
+    blackbody_srgb, distance_ly_from_parallax_mas, effective_temperature_from_b_v,
+    equatorial_to_ecliptic_direction, load_star_catalog, parse_celestia_stars_dat,
+    parse_hipparcos_main, read_celestia_stars_dat, read_delimited_catalog, read_hipparcos_main,
+    CatalogFormat, Star, StarCatalog, LIGHT_YEAR_PER_PARSEC, PARSEC_PER_LIGHT_YEAR,
+};
 pub use stellar::{
     classify_star_by_color_index, compute_distance_modulus_and_pc, estimate_stellar_temperature_k,
     stellar_classification_to_json, PhotometricDistance, SpectralType, StellarClassification,
 };
+pub use tabular::Table;
 pub use transient::{
     compute_difference_image_2d, estimate_scale_factor_2d, transient_result_to_json,
     SubtractionResult, TransientCandidate, TransientClassification,

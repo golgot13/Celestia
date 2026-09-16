@@ -207,9 +207,9 @@ pub fn transient_result_to_json(result: &SubtractionResult) -> String {
         json.push_str(&format!("{:?}", c.classification));
         json.push_str("\"\n    }");
         if i + 1 < result.detected_transients.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

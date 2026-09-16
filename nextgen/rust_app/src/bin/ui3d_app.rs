@@ -6,16 +6,19 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytemuck::{Pod, Zeroable};
 use egui::{Color32, RichText};
-use glam::{DMat4, DVec3, Mat4, Vec3};
+use glam::{DMat4, DVec3, DVec4, Mat4, Vec3};
 use observatory_core::{
     analyze_frame, apply_pointing_correction, build_application, build_sky_chart,
-    compute_local_sidereal_time_rad, config_to_targets, deg_to_rad, ecliptic_vector_to_equatorial,
-    initialize_mount, parse_campaign_config, rad_to_deg, read_fits_file, sample_diurnal_track,
-    scan_frame_directory, schedule_observation_queue, stack_frame_files, start_capture,
-    AtmosphericConditions, CalibrationFrame, CampaignTarget, CampaignTargetConfig, CaptureResult,
-    CaptureSession, DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord, MountState,
-    PointingModelTerms, QcThresholds, SchedulePlan, SiteLimits, SkyChart, SkyObjectClass,
-    SkyObjectRequest, StackedResult, StackingMethod, StackingParams,
+    compute_catalogue_positions_au, compute_local_sidereal_time_rad, config_to_targets, deg_to_rad,
+    ecliptic_vector_to_equatorial, evaluate_body_orientation, initialize_mount,
+    parse_campaign_config, pole_direction_ecliptic, rad_to_deg, read_fits_file, read_ppm_file,
+    sample_diurnal_track, scan_frame_directory, schedule_observation_queue, solar_system_catalogue,
+    stack_frame_files, start_capture, AtmosphericConditions, BodyClass, BodyOrientation,
+    CalibrationFrame, CampaignTarget, CampaignTargetConfig, CaptureResult, CaptureSession,
+    DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord, MountState, OrbitModel,
+    PointingModelTerms, PpmImage, QcThresholds, ReferencePlane, RingGeometry, SchedulePlan,
+    SiteLimits, SkyChart, SkyObjectClass, SkyObjectRequest, SolarSystemBody, StackedResult,
+    StackingMethod, StackingParams,
 };
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -24,38 +27,36 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowBuilder};
 
-const PLANET_TEXTURE_LAYER_COUNT: u32 = 3;
 const J2000_JULIAN_DAY: f64 = 2451545.0;
 const UNIX_EPOCH_JULIAN_DAY: f64 = 2440587.5;
 const KM_PER_AU: f64 = 149_597_870.7;
 const AU_TO_SCENE_UNITS: f64 = 1.0;
+/// Linear limb-darkening coefficient of the solar photosphere in the visible band.
+const SOLAR_LIMB_DARKENING_U: f32 = 0.6;
+/// Bond albedo of the icy particles that dominate the Saturnian ring system.
+const RING_PARTICLE_ALBEDO: f32 = 0.5;
 
 const PLANET_SHADER_WGSL: &str = r#"
 struct FrameUniform {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
+    normal_matrix: mat4x4<f32>,
     light_dir: vec4<f32>,
     camera_pos: vec4<f32>,
-    planet_color: vec4<f32>,
+    base_color: vec4<f32>,
     atmosphere_color: vec4<f32>,
-    atmosphere_strength: f32,
-    specular_power: f32,
-    specular_strength: f32,
-    body_time_s: f32,
-    interior_motion: f32,
-    atmosphere_motion: f32,
-    surface_texture_weight: f32,
-    _padding: f32,
+    surface_params: vec4<f32>,
+    shape_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
 var<uniform> frame: FrameUniform;
 
 @group(0) @binding(1)
-var mars_layer_texture: texture_2d_array<f32>;
+var surface_map: texture_2d<f32>;
 
 @group(0) @binding(2)
-var mars_layer_sampler: sampler;
+var surface_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -68,6 +69,7 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) body_normal: vec3<f32>,
 };
 
 @vertex
@@ -75,7 +77,8 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     let world = frame.model * vec4<f32>(input.position, 1.0);
     out.world_position = world.xyz;
-    out.world_normal = normalize((frame.model * vec4<f32>(input.normal, 0.0)).xyz);
+    out.world_normal = normalize((frame.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
+    out.body_normal = normalize(input.normal);
     out.uv = input.uv;
     out.clip_position = frame.view_proj * world;
     return out;
@@ -115,61 +118,74 @@ fn fbm(p: vec3<f32>) -> f32 {
     return sum / normalization;
 }
 
+fn reinhard_tone_map(color: vec3<f32>) -> vec3<f32> {
+    return color / (vec3<f32>(1.0, 1.0, 1.0) + color);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(input.world_normal);
-    let l = normalize(frame.light_dir.xyz);
     let v = normalize(frame.camera_pos.xyz - input.world_position);
-    let h = normalize(l + v);
+    let has_texture = frame.surface_params.x;
+    let is_emissive = frame.surface_params.y;
+    let class_id = frame.surface_params.z;
+    let cloud_phase = frame.surface_params.w;
+    let limb_u = frame.shape_params.y;
+    let exposure = frame.shape_params.z;
+    let specular_strength = frame.shape_params.w;
 
-    let light_alignment = dot(n, l);
-    let ndotl = max(light_alignment, 0.0);
+    if (is_emissive > 0.5) {
+        // Photosphere: linear limb darkening I(mu)/I(1) = 1 - u (1 - mu), modulated by
+        // a granulation pattern whose contrast matches the observed few-percent level.
+        let mu = max(dot(n, v), 0.0);
+        let limb = 1.0 - limb_u * (1.0 - mu);
+        let granulation = fbm(input.body_normal * 46.0 + vec3<f32>(cloud_phase, 0.0, -cloud_phase));
+        let intensity = limb * (0.97 + 0.06 * granulation);
+        let radiance = frame.base_color.rgb * intensity * exposure;
+        return vec4<f32>(reinhard_tone_map(radiance), 1.0);
+    }
+
+    let l = normalize(frame.light_dir.xyz);
+    let irradiance = frame.light_dir.w;
+    let ndotl = max(dot(n, l), 0.0);
     let ndotv = max(dot(n, v), 0.0);
-    let daylight = smoothstep(-0.08, 0.42, light_alignment);
-    let terminator = smoothstep(-0.22, 0.08, light_alignment) * (1.0 - daylight);
+    let albedo = frame.base_color.w;
 
-    let envelope_phase = frame.body_time_s * frame.interior_motion;
-    let atmosphere_phase = frame.body_time_s * frame.atmosphere_motion;
-    let continental = fbm(n * 2.15 + vec3<f32>(1.8, 4.1, 2.6));
-    let uplands = fbm(n * 7.20 + vec3<f32>(9.2, 1.7, 5.4));
-    let interior_flow = fbm(n * 4.20 + vec3<f32>(0.06 * envelope_phase, 0.025 * envelope_phase, -0.04 * envelope_phase));
-    let weather = fbm(n * vec3<f32>(9.0, 3.4, 9.0) + vec3<f32>(2.7 + 0.055 * atmosphere_phase, 6.1, 0.8 - 0.035 * atmosphere_phase));
-    let latitude = abs(n.y);
-    let land_mask = smoothstep(0.55, 0.66, continental + 0.11 * uplands - 0.06 * latitude);
-    let coast_mask = smoothstep(0.46, 0.58, continental) * (1.0 - land_mask);
-    let cloud_mask = smoothstep(0.62, 0.82, weather + 0.10 * (1.0 - latitude)) * smoothstep(-0.70, 0.16, light_alignment);
+    var surface = frame.base_color.rgb;
+    if (has_texture > 0.5) {
+        surface = textureSample(surface_map, surface_sampler, input.uv).rgb;
+    } else {
+        // No published surface map: procedural relief, with contrast bounded so that the
+        // disc-integrated brightness stays driven by the measured geometric albedo.
+        let relief = fbm(input.body_normal * 6.4);
+        let craters = fbm(input.body_normal * 21.0);
+        surface = surface * (0.80 + 0.40 * relief) * (0.88 + 0.24 * craters);
+    }
 
-    let spec_angle = max(dot(n, h), 0.0);
-    let dust_sheen = 0.18 + 0.24 * (1.0 - land_mask);
-    let specular = pow(spec_angle, frame.specular_power) * frame.specular_strength * dust_sheen * daylight;
-    let fresnel = pow(1.0 - ndotv, 3.6) * (0.40 + 0.60 * frame.atmosphere_strength);
-    let scattering = pow(ndotl, 4.0) * (0.10 + 0.90 * frame.atmosphere_strength);
+    if (class_id > 1.5) {
+        // Gas and ice giants: zonal banding advected by the equatorial wind field.
+        let latitude = clamp(input.body_normal.y, -1.0, 1.0);
+        let bands = sin(latitude * 18.0 + 0.6 * sin(latitude * 7.0 + cloud_phase));
+        surface = surface * (0.92 + 0.10 * bands);
+    }
 
-    let interior_texel = textureSample(mars_layer_texture, mars_layer_sampler, input.uv, 0).rgb;
-    let mars_texel = textureSample(mars_layer_texture, mars_layer_sampler, input.uv, 1).rgb;
-    let atmosphere_uv = fract(input.uv + vec2<f32>(0.012 * atmosphere_phase, 0.004 * sin(0.27 * atmosphere_phase)));
-    let atmosphere_texel = textureSample(mars_layer_texture, mars_layer_sampler, atmosphere_uv, 2);
-    let observed_albedo = mars_texel * vec3<f32>(1.08, 0.88, 0.72);
-    let basalt_plain = frame.planet_color.rgb * vec3<f32>(0.48, 0.40, 0.34) + vec3<f32>(0.018, 0.012, 0.008);
-    let dust_plain = frame.planet_color.rgb * vec3<f32>(0.92, 0.66, 0.43) + vec3<f32>(0.040, 0.022, 0.012);
-    let lowland = frame.planet_color.rgb * vec3<f32>(0.74, 0.50, 0.34) + vec3<f32>(0.030, 0.016, 0.010);
-    let highland = frame.planet_color.rgb * vec3<f32>(1.08, 0.76, 0.52) + vec3<f32>(0.050, 0.030, 0.018);
-    let land = mix(lowland, highland, smoothstep(0.48, 0.78, uplands));
-    let polar = smoothstep(0.70, 0.93, latitude);
-    var surface = mix(basalt_plain, dust_plain, coast_mask * 0.78);
-    surface = mix(surface, land, land_mask);
-    surface = mix(surface, vec3<f32>(0.78, 0.72, 0.64), polar * 0.42);
-    surface = mix(surface, vec3<f32>(0.70, 0.56, 0.44), cloud_mask * 0.10 * daylight);
-    surface = mix(surface, observed_albedo, frame.surface_texture_weight);
+    // Lambertian reflectance scaled by the measured geometric albedo and by the solar
+    // irradiance at the body distance (inverse-square law).
+    let diffuse = surface * albedo * ndotl * irradiance;
 
-    let direct_light = 0.018 + 0.982 * daylight * (0.24 + 0.76 * ndotl);
-    let nightside = interior_texel * (0.016 + 0.020 * interior_flow) * (1.0 - daylight);
-    let atmosphere_density = 0.68 + 0.44 * atmosphere_texel.a;
-    let dust_scatter = atmosphere_texel.rgb * 0.030 * daylight * frame.atmosphere_strength;
-    let atmosphere = frame.atmosphere_color.rgb * (0.48 * fresnel + 0.34 * scattering + 0.22 * terminator) * atmosphere_density + dust_scatter;
+    let h = normalize(l + v);
+    let specular = pow(max(dot(n, h), 0.0), 48.0) * specular_strength * ndotl * irradiance;
 
-    let color = surface * direct_light + nightside + atmosphere + vec3<f32>(specular, specular, specular);
-    return vec4<f32>(color, 1.0);
+    let optical_thickness = frame.atmosphere_color.w;
+    let rim = pow(1.0 - ndotv, 3.2);
+    let forward = pow(ndotl, 2.0);
+    let atmosphere = frame.atmosphere_color.rgb
+        * optical_thickness
+        * irradiance
+        * (0.55 * rim * ndotl + 0.25 * forward);
+
+    let radiance = (diffuse + atmosphere + vec3<f32>(specular, specular, specular)) * exposure;
+    return vec4<f32>(reinhard_tone_map(radiance), 1.0);
 }
 "#;
 
@@ -177,28 +193,23 @@ const ATMOSPHERE_SHADER_WGSL: &str = r#"
 struct FrameUniform {
     view_proj: mat4x4<f32>,
     model: mat4x4<f32>,
+    normal_matrix: mat4x4<f32>,
     light_dir: vec4<f32>,
     camera_pos: vec4<f32>,
-    planet_color: vec4<f32>,
+    base_color: vec4<f32>,
     atmosphere_color: vec4<f32>,
-    atmosphere_strength: f32,
-    specular_power: f32,
-    specular_strength: f32,
-    body_time_s: f32,
-    interior_motion: f32,
-    atmosphere_motion: f32,
-    surface_texture_weight: f32,
-    _padding: f32,
+    surface_params: vec4<f32>,
+    shape_params: vec4<f32>,
 };
 
 @group(0) @binding(0)
 var<uniform> frame: FrameUniform;
 
 @group(0) @binding(1)
-var mars_layer_texture: texture_2d_array<f32>;
+var surface_map: texture_2d<f32>;
 
 @group(0) @binding(2)
-var mars_layer_sampler: sampler;
+var surface_sampler: sampler;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -210,32 +221,20 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
-    @location(2) uv: vec2<f32>,
+    @location(2) shell_altitude: f32,
 };
-
-fn hash31(p: vec3<f32>) -> f32 {
-    return fract(sin(dot(p, vec3<f32>(71.3, 183.1, 421.7))) * 9182.731);
-}
-
-fn soft_noise(p: vec3<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (vec3<f32>(3.0, 3.0, 3.0) - 2.0 * f);
-    let x00 = mix(hash31(i + vec3<f32>(0.0, 0.0, 0.0)), hash31(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
-    let x10 = mix(hash31(i + vec3<f32>(0.0, 1.0, 0.0)), hash31(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
-    let x01 = mix(hash31(i + vec3<f32>(0.0, 0.0, 1.0)), hash31(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
-    let x11 = mix(hash31(i + vec3<f32>(0.0, 1.0, 1.0)), hash31(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
-    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
-}
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let shell_position = input.position * 1.035;
+    // The shell radius is the body radius plus the number of scale heights carried in
+    // shape_params.x, so the limb thickness follows the real atmospheric extent.
+    let shell_scale = 1.0 + frame.shape_params.x;
+    let shell_position = input.position * shell_scale;
     let world = frame.model * vec4<f32>(shell_position, 1.0);
     out.world_position = world.xyz;
-    out.world_normal = normalize((frame.model * vec4<f32>(input.normal, 0.0)).xyz);
-    out.uv = input.uv;
+    out.world_normal = normalize((frame.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
+    out.shell_altitude = frame.shape_params.x;
     out.clip_position = frame.view_proj * world;
     return out;
 }
@@ -245,18 +244,110 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let n = normalize(input.world_normal);
     let l = normalize(frame.light_dir.xyz);
     let v = normalize(frame.camera_pos.xyz - input.world_position);
+    let irradiance = frame.light_dir.w;
     let ndotl = max(dot(n, l), 0.0);
     let ndotv = max(dot(n, v), 0.0);
-    let phase = frame.body_time_s * frame.atmosphere_motion;
-    let flow_uv = fract(input.uv + vec2<f32>(0.018 * phase, 0.006 * sin(0.31 * phase)));
-    let dust = textureSample(mars_layer_texture, mars_layer_sampler, flow_uv, 2);
-    let turbulence = soft_noise(n * 12.0 + vec3<f32>(0.09 * phase, 0.02 * phase, -0.06 * phase));
-    let limb = pow(1.0 - ndotv, 2.2);
-    let forward_scatter = pow(ndotl, 3.0);
-    let density = frame.atmosphere_strength * (0.16 + 0.84 * dust.a) * (0.65 + 0.35 * turbulence);
-    let alpha = clamp((0.030 + 0.22 * limb + 0.050 * forward_scatter) * density, 0.0, 0.32);
-    let color = frame.atmosphere_color.rgb * (0.45 + 0.55 * forward_scatter) + dust.rgb * 0.045;
+
+    // Slant optical depth through a plane-parallel shell grows as 1 / cos(view angle),
+    // which concentrates the scattering signal on the limb.
+    let slant = 1.0 / max(ndotv, 0.04);
+    let optical_depth = frame.atmosphere_color.w * slant;
+    let transmittance = exp(-optical_depth);
+    let scattered = (1.0 - transmittance) * ndotl * irradiance;
+
+    // Rayleigh phase function for unpolarised single scattering.
+    let cos_theta = clamp(dot(-v, l), -1.0, 1.0);
+    let rayleigh_phase = 0.75 * (1.0 + cos_theta * cos_theta) / 3.0;
+
+    let alpha = clamp(scattered * (0.35 + 0.65 * rayleigh_phase), 0.0, 0.85);
+    let color = frame.atmosphere_color.rgb * (0.6 + 0.4 * rayleigh_phase);
     return vec4<f32>(color, alpha);
+}
+"#;
+
+const RING_SHADER_WGSL: &str = r#"
+struct FrameUniform {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    normal_matrix: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    camera_pos: vec4<f32>,
+    base_color: vec4<f32>,
+    atmosphere_color: vec4<f32>,
+    surface_params: vec4<f32>,
+    shape_params: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var<uniform> frame: FrameUniform;
+
+@group(0) @binding(1)
+var surface_map: texture_2d<f32>;
+
+@group(0) @binding(2)
+var surface_sampler: sampler;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) plane_normal: vec3<f32>,
+    @location(2) radial_fraction: f32,
+};
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    // Vertices carry a unit direction in the ring plane; the radial fraction in uv.x is
+    // mapped between the inner radius ratio (shape_params.x) and the outer radius.
+    let inner_ratio = frame.shape_params.x;
+    let radius = mix(inner_ratio, 1.0, input.uv.x);
+    let local = vec3<f32>(input.position.x * radius, 0.0, input.position.z * radius);
+    let world = frame.model * vec4<f32>(local, 1.0);
+    out.world_position = world.xyz;
+    out.plane_normal = normalize((frame.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
+    out.radial_fraction = input.uv.x;
+    out.clip_position = frame.view_proj * world;
+    return out;
+}
+
+fn ring_optical_depth(radial_fraction: f32, base_depth: f32) -> f32 {
+    // Radial structure of the Saturnian ring system: the Cassini division near the
+    // outer third of the span is nearly transparent, the B ring is the densest part.
+    let cassini = 1.0 - 0.92 * exp(-pow((radial_fraction - 0.62) / 0.035, 2.0));
+    let b_ring = 1.0 + 0.85 * exp(-pow((radial_fraction - 0.45) / 0.14, 2.0));
+    let inner_fade = smoothstep(0.0, 0.10, radial_fraction);
+    let outer_fade = 1.0 - smoothstep(0.90, 1.0, radial_fraction);
+    return base_depth * cassini * b_ring * inner_fade * outer_fade;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let l = normalize(frame.light_dir.xyz);
+    let v = normalize(frame.camera_pos.xyz - input.world_position);
+    let irradiance = frame.light_dir.w;
+    let exposure = frame.shape_params.z;
+
+    let normal = normalize(input.plane_normal);
+    let mu_view = abs(dot(normal, v));
+    let mu_sun = abs(dot(normal, l));
+    if (mu_view < 1.0e-4 || mu_sun < 1.0e-4) {
+        discard;
+    }
+
+    let tau = ring_optical_depth(input.radial_fraction, frame.atmosphere_color.w);
+    // Single-scattering slab: reflected fraction of the incident flux.
+    let reflected = frame.base_color.w * mu_sun * (1.0 - exp(-tau * (1.0 / mu_view + 1.0 / mu_sun)));
+    let opacity = clamp(1.0 - exp(-tau / mu_view), 0.0, 1.0);
+
+    let radiance = frame.base_color.rgb * reflected * irradiance * exposure;
+    let color = radiance / (vec3<f32>(1.0, 1.0, 1.0) + radiance);
+    return vec4<f32>(color, opacity);
 }
 "#;
 
@@ -272,33 +363,31 @@ var<uniform> view_data: ViewUniform;
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
-    @location(1) luminance: f32,
+    @location(1) color: vec3<f32>,
+    @location(2) irradiance: f32,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) luminance: f32,
-    @location(1) world_position: vec3<f32>,
+    @location(0) color: vec3<f32>,
+    @location(1) irradiance: f32,
 };
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = view_data.view_proj * vec4<f32>(input.position, 1.0);
-    out.luminance = input.luminance;
-    out.world_position = input.position;
+    out.color = input.color;
+    out.irradiance = input.irradiance;
     return out;
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let warm = vec3<f32>(1.0, 0.97, 0.89);
-    let cold = vec3<f32>(0.72, 0.84, 1.0);
-    let t = clamp(input.luminance, 0.0, 1.0);
-
-    let twinkle = 0.78 + 0.22 * sin(view_data.time_s * 1.85 + dot(input.world_position, vec3<f32>(0.11, 0.17, 0.13)));
-    let color = mix(cold, warm, t) * (0.24 + 0.76 * t) * twinkle;
-    return vec4<f32>(color, 1.0);
+    // The star colour comes from its effective temperature and its brightness from the
+    // catalogue apparent magnitude, already converted to a relative irradiance.
+    let radiance = input.color * input.irradiance;
+    return vec4<f32>(radiance / (vec3<f32>(1.0, 1.0, 1.0) + radiance), 1.0);
 }
 "#;
 
@@ -360,13 +449,14 @@ impl MeshVertex {
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct StarVertex {
     position: [f32; 3],
-    luminance: f32,
+    color: [f32; 3],
+    irradiance: f32,
 }
 
 impl StarVertex {
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRS: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32];
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<StarVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -399,18 +489,35 @@ impl GuideVertex {
 struct FrameUniform {
     view_proj: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    normal_matrix: [[f32; 4]; 4],
+    /// xyz: unit vector toward the Sun. w: solar irradiance relative to 1 au.
     light_dir: [f32; 4],
     camera_pos: [f32; 4],
-    planet_color: [f32; 4],
+    /// rgb: linear base colour. w: geometric albedo.
+    base_color: [f32; 4],
+    /// rgb: scattering colour. w: normal optical depth.
     atmosphere_color: [f32; 4],
-    atmosphere_strength: f32,
-    specular_power: f32,
-    specular_strength: f32,
-    body_time_s: f32,
-    interior_motion: f32,
-    atmosphere_motion: f32,
-    surface_texture_weight: f32,
-    _padding: f32,
+    /// x: has_texture, y: is_emissive, z: class id, w: cloud drift phase (radians).
+    surface_params: [f32; 4],
+    /// x: shell thickness ratio, y: limb darkening u, z: exposure, w: specular strength.
+    shape_params: [f32; 4],
+}
+
+impl FrameUniform {
+    fn identity() -> Self {
+        let identity = Mat4::IDENTITY.to_cols_array_2d();
+        Self {
+            view_proj: identity,
+            model: identity,
+            normal_matrix: identity,
+            light_dir: [0.0, 0.0, 1.0, 1.0],
+            camera_pos: [0.0, 0.0, 0.0, 0.0],
+            base_color: [1.0, 1.0, 1.0, 0.3],
+            atmosphere_color: [0.0, 0.0, 0.0, 0.0],
+            surface_params: [0.0, 0.0, 0.0, 0.0],
+            shape_params: [0.0, SOLAR_LIMB_DARKENING_U, 1.0, 0.0],
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -443,10 +550,9 @@ struct CliOptions {
     fov_deg: f32,
     near_plane: f32,
     far_plane: f32,
-    planet_radius: f32,
     star_shell_radius: f32,
-    planet_rotation_deg_per_s: f32,
-    atmosphere_strength: f32,
+    exposure: f32,
+    time_scale: f64,
     show_guides: bool,
 }
 
@@ -463,10 +569,9 @@ impl Default for CliOptions {
             fov_deg: 56.0,
             near_plane: 0.000001,
             far_plane: 400.0,
-            planet_radius: 1.0,
             star_shell_radius: 45.0,
-            planet_rotation_deg_per_s: 7.5,
-            atmosphere_strength: 0.18,
+            exposure: 1.6,
+            time_scale: 1.0,
             show_guides: false,
         }
     }
@@ -688,53 +793,6 @@ impl ScienceState {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct OrbitalElements {
-    semi_major_axis_au: f64,
-    eccentricity: f64,
-    inclination_deg: f64,
-    longitude_ascending_node_deg: f64,
-    longitude_perihelion_deg: f64,
-    mean_longitude_deg: f64,
-    orbital_period_days: f64,
-}
-
-#[derive(Clone, Debug)]
-enum BodyOrbit {
-    FixedSun,
-    Heliocentric(OrbitalElements),
-    Planetocentric {
-        parent_index: usize,
-        semi_major_axis_au: f64,
-        orbital_period_days: f64,
-        inclination_deg: f64,
-        mean_longitude_deg: f64,
-    },
-    BeltObject {
-        semi_major_axis_au: f64,
-        eccentricity: f64,
-        inclination_deg: f64,
-        longitude_ascending_node_deg: f64,
-        longitude_perihelion_deg: f64,
-        mean_longitude_deg: f64,
-        orbital_period_days: f64,
-    },
-}
-
-#[derive(Clone, Debug)]
-struct CelestialBody {
-    name: &'static str,
-    texture_asset: &'static str,
-    orbit: BodyOrbit,
-    radius_scene: f32,
-    rotation_multiplier: f32,
-    surface_color: [f32; 4],
-    atmosphere_color: [f32; 4],
-    atmosphere_strength: f32,
-    specular_strength: f32,
-    surface_texture_weight: f32,
-}
-
 #[derive(Clone, Debug)]
 struct RuntimeSummary {
     app_name: String,
@@ -767,7 +825,12 @@ impl Camera {
         let center = self.target;
         let up = DVec3::Y;
         let view = DMat4::look_at_rh(eye, center, up);
-        let proj = DMat4::perspective_rh(self.fov_deg.to_radians() as f64, aspect, self.near_plane as f64, self.far_plane as f64);
+        let proj = reverse_z_perspective_rh(
+            self.fov_deg.to_radians() as f64,
+            aspect,
+            self.near_plane as f64,
+            self.far_plane as f64,
+        );
         proj * view
     }
 
@@ -806,16 +869,9 @@ struct DepthBuffer {
     view: wgpu::TextureView,
 }
 
-#[derive(Debug)]
-struct TextureLodImage {
-    width: u32,
-    height: u32,
-    rgb: Vec<u8>,
-}
-
-struct PlanetLayerTextures {
-    layer_view: wgpu::TextureView,
-    layer_sampler: wgpu::Sampler,
+struct SurfaceTexture {
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
 }
 
 impl DepthBuffer {
@@ -845,6 +901,15 @@ struct UiFrameData {
     pixels_per_point: f32,
 }
 
+struct RingDraw {
+    body_index: usize,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+    outer_radius_scene: f32,
+    inner_radius_ratio: f32,
+    geometry: RingGeometry,
+}
+
 struct RenderState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -855,16 +920,16 @@ struct RenderState {
 
     planet_pipeline: wgpu::RenderPipeline,
     atmosphere_pipeline: wgpu::RenderPipeline,
+    ring_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     guide_pipeline: wgpu::RenderPipeline,
 
     frame_uniform: FrameUniform,
-    _frame_buffer: wgpu::Buffer,
-    _frame_bind_group: wgpu::BindGroup,
     body_frame_buffers: Vec<wgpu::Buffer>,
     planet_bind_groups: Vec<wgpu::BindGroup>,
-    _planet_layers: Vec<PlanetLayerTextures>,
+    ring_draws: Vec<RingDraw>,
+    _surface_textures: Vec<SurfaceTexture>,
 
     view_uniform: ViewUniform,
     view_buffer: wgpu::Buffer,
@@ -873,6 +938,10 @@ struct RenderState {
     planet_vertex_buffer: wgpu::Buffer,
     planet_index_buffer: wgpu::Buffer,
     planet_index_count: u32,
+
+    ring_vertex_buffer: wgpu::Buffer,
+    ring_index_buffer: wgpu::Buffer,
+    ring_index_count: u32,
 
     star_vertex_buffer: wgpu::Buffer,
     star_count: u32,
@@ -888,15 +957,16 @@ struct RenderState {
 
     target_count: usize,
     show_guides: bool,
+    show_rings: bool,
+    show_atmospheres: bool,
     paused: bool,
-    atmosphere_strength: f32,
-    planet_rotation_deg_per_s: f32,
-
-    planet_rotation_rad: f32,
-    light_orbit_rad: f32,
+    exposure: f32,
+    time_scale: f64,
+    simulated_julian_day: f64,
     elapsed_time_s: f32,
-    solar_system_bodies: Vec<CelestialBody>,
+    solar_system_bodies: Vec<SolarSystemBody>,
     solar_system_positions: Vec<Vec3>,
+    body_orientations: Vec<BodyOrientation>,
     selected_body_index: Option<usize>,
 
     runtime: RuntimeSummary,
@@ -983,52 +1053,16 @@ impl RenderState {
 
         let aspect = config.width as f32 / config.height as f32;
         let view_proj = camera.view_proj(aspect);
-        let sky_tint = tone_map_color(sky_background_color(0.75, 8.0));
-        let solar_glow = solar_halo_color(0.75, 0.9);
-        let (planet_color, atmosphere_color) = atmospheric_palette(
-            options.atmosphere_strength,
-            0.75,
-        );
 
-        let frame_uniform = FrameUniform {
-            view_proj: view_proj.to_cols_array_2d(),
-            model: Mat4::IDENTITY.to_cols_array_2d(),
-            light_dir: [0.7, 0.35, 0.61, 0.0],
-            camera_pos: [
-                camera.eye().x as f32,
-                camera.eye().y as f32,
-                camera.eye().z as f32,
-                0.0,
-            ],
-            planet_color: [
-                (planet_color[0] * 0.94 + sky_tint[0] * 0.03 + solar_glow[0] * 0.03).clamp(0.0, 1.0),
-                (planet_color[1] * 0.94 + sky_tint[1] * 0.03 + solar_glow[1] * 0.03).clamp(0.0, 1.0),
-                (planet_color[2] * 0.94 + sky_tint[2] * 0.03 + solar_glow[2] * 0.03).clamp(0.0, 1.0),
-                1.0,
-            ],
-            atmosphere_color: [
-                (atmosphere_color[0] * 0.88 + sky_tint[0] * 0.04 + solar_glow[0] * 0.08).clamp(0.0, 1.0),
-                (atmosphere_color[1] * 0.88 + sky_tint[1] * 0.04 + solar_glow[1] * 0.08).clamp(0.0, 1.0),
-                (atmosphere_color[2] * 0.88 + sky_tint[2] * 0.04 + solar_glow[2] * 0.08).clamp(0.0, 1.0),
-                1.0,
-            ],
-            atmosphere_strength: options.atmosphere_strength,
-            specular_power: 48.0,
-            specular_strength: 0.045,
-            body_time_s: 0.0,
-            interior_motion: 0.35,
-            atmosphere_motion: 1.0,
-            surface_texture_weight: 0.92,
-            _padding: 0.0,
-        };
-
-        let frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("frame_uniform_buffer"),
-            contents: bytemuck::bytes_of(&frame_uniform),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let planet_layers = load_planet_layer_textures(&device, &queue, "mars")?;
+        let mut frame_uniform = FrameUniform::identity();
+        frame_uniform.view_proj = view_proj.to_cols_array_2d();
+        frame_uniform.camera_pos = [
+            camera.eye().x as f32,
+            camera.eye().y as f32,
+            camera.eye().z as f32,
+            0.0,
+        ];
+        frame_uniform.shape_params[2] = options.exposure;
 
         let view_uniform = ViewUniform::new(view_proj, 0.0);
 
@@ -1056,7 +1090,7 @@ impl RenderState {
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
@@ -1070,49 +1104,33 @@ impl RenderState {
             ],
         });
 
-        let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame_bind_group"),
-            layout: &frame_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&planet_layers.layer_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&planet_layers.layer_sampler),
-                },
-            ],
-        });
-
-        let solar_system_bodies = build_solar_system_bodies();
+        let solar_system_bodies = solar_system_catalogue();
         let mut body_frame_buffers = Vec::with_capacity(solar_system_bodies.len());
         let mut planet_bind_groups = Vec::with_capacity(solar_system_bodies.len());
-        let mut planet_layer_resources = Vec::with_capacity(solar_system_bodies.len() + 1);
-        planet_layer_resources.push(planet_layers);
+        let mut ring_draws = Vec::new();
+        let mut surface_textures = vec![create_neutral_surface_texture(&device, &queue)];
+        let mut asset_texture_indices = HashMap::<&'static str, usize>::new();
 
-        let mut asset_layer_indices = HashMap::<&'static str, usize>::new();
-        asset_layer_indices.insert("mars", 0);
-
-        for body in &solar_system_bodies {
-            let layer_index = if let Some(index) = asset_layer_indices.get(body.texture_asset) {
-                *index
-            } else {
-                let layer_index = planet_layer_resources.len();
-                planet_layer_resources.push(load_planet_layer_textures(&device, &queue, body.texture_asset)?);
-                asset_layer_indices.insert(body.texture_asset, layer_index);
-                layer_index
+        for (body_index, body) in solar_system_bodies.iter().enumerate() {
+            let texture_index = match body.texture_asset {
+                None => 0,
+                Some(asset) => match asset_texture_indices.get(asset) {
+                    Some(index) => *index,
+                    None => {
+                        let index = surface_textures.len();
+                        surface_textures.push(load_surface_texture(&device, &queue, asset)?);
+                        asset_texture_indices.insert(asset, index);
+                        index
+                    }
+                },
             };
+
             let body_frame_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("solar_system_body_frame_uniform_buffer"),
                 contents: bytemuck::bytes_of(&frame_uniform),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-            let layers = &planet_layer_resources[layer_index];
+            let surface = &surface_textures[texture_index];
             planet_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("solar_system_body_bind_group"),
                 layout: &frame_bind_group_layout,
@@ -1123,17 +1141,57 @@ impl RenderState {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&layers.layer_view),
+                        resource: wgpu::BindingResource::TextureView(&surface.view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&layers.layer_sampler),
+                        resource: wgpu::BindingResource::Sampler(&surface.sampler),
                     },
                 ],
             }));
             body_frame_buffers.push(body_frame_buffer);
+
+            if let Some(geometry) = body.ring {
+                let ring_uniform_buffer =
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("ring_frame_uniform_buffer"),
+                        contents: bytemuck::bytes_of(&frame_uniform),
+                        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    });
+                let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("ring_bind_group"),
+                    layout: &frame_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ring_uniform_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&surface.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&surface.sampler),
+                        },
+                    ],
+                });
+                ring_draws.push(RingDraw {
+                    body_index,
+                    uniform_buffer: ring_uniform_buffer,
+                    bind_group,
+                    outer_radius_scene: (geometry.outer_radius_km / KM_PER_AU * AU_TO_SCENE_UNITS)
+                        as f32,
+                    inner_radius_ratio: (geometry.inner_radius_km / geometry.outer_radius_km) as f32,
+                    geometry,
+                });
+            }
         }
         let solar_system_positions = vec![Vec3::ZERO; solar_system_bodies.len()];
+        let body_orientations: Vec<BodyOrientation> = solar_system_bodies
+            .iter()
+            .map(|body| evaluate_body_orientation(&body.rotation, J2000_JULIAN_DAY))
+            .collect();
 
         let view_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view_bind_group_layout"),
@@ -1166,6 +1224,11 @@ impl RenderState {
         let atmosphere_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("atmosphere_shader"),
             source: wgpu::ShaderSource::Wgsl(ATMOSPHERE_SHADER_WGSL.into()),
+        });
+
+        let ring_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("ring_shader"),
+            source: wgpu::ShaderSource::Wgsl(RING_SHADER_WGSL.into()),
         });
 
         let star_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1250,7 +1313,7 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1279,6 +1342,44 @@ impl RenderState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Greater,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let ring_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("ring_pipeline"),
+            layout: Some(&planet_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &ring_shader,
+                entry_point: "vs_main",
+                buffers: &[MeshVertex::layout()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &ring_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                // Ring particles are visible from both faces of the ring plane.
                 cull_mode: None,
                 polygon_mode: wgpu::PolygonMode::Fill,
                 unclipped_depth: false,
@@ -1287,7 +1388,7 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::Greater,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1337,7 +1438,7 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1380,7 +1481,7 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1423,7 +1524,7 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_compare: wgpu::CompareFunction::GreaterEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1431,7 +1532,7 @@ impl RenderState {
             multiview: None,
         });
 
-        let (planet_vertices, planet_indices) = generate_uv_sphere(96, 64, options.planet_radius);
+        let (planet_vertices, planet_indices) = generate_uv_sphere(96, 64, 1.0);
         let planet_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("planet_vertex_buffer"),
             contents: bytemuck::cast_slice(&planet_vertices),
@@ -1441,6 +1542,18 @@ impl RenderState {
         let planet_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("planet_index_buffer"),
             contents: bytemuck::cast_slice(&planet_indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let (ring_vertices, ring_indices) = generate_ring_annulus(256, 48);
+        let ring_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ring_vertex_buffer"),
+            contents: bytemuck::cast_slice(&ring_vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ring_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("ring_index_buffer"),
+            contents: bytemuck::cast_slice(&ring_indices),
             usage: wgpu::BufferUsages::INDEX,
         });
 
@@ -1522,21 +1635,24 @@ impl RenderState {
             depth,
             planet_pipeline,
             atmosphere_pipeline,
+            ring_pipeline,
             star_pipeline,
             sky_pipeline,
             guide_pipeline,
             frame_uniform,
-            _frame_buffer: frame_buffer,
-            _frame_bind_group: frame_bind_group,
             body_frame_buffers,
             planet_bind_groups,
-            _planet_layers: planet_layer_resources,
+            ring_draws,
+            _surface_textures: surface_textures,
             view_uniform,
             view_buffer,
             view_bind_group,
             planet_vertex_buffer,
             planet_index_buffer,
             planet_index_count: planet_indices.len() as u32,
+            ring_vertex_buffer,
+            ring_index_buffer,
+            ring_index_count: ring_indices.len() as u32,
             star_vertex_buffer,
             star_count: star_vertices.len() as u32,
             sky_vertex_buffer,
@@ -1548,14 +1664,16 @@ impl RenderState {
             input: InputState::default(),
             target_count: scene.targets.len(),
             show_guides: options.show_guides,
+            show_rings: true,
+            show_atmospheres: true,
             paused: false,
-            atmosphere_strength: options.atmosphere_strength,
-            planet_rotation_deg_per_s: options.planet_rotation_deg_per_s,
-            planet_rotation_rad: 0.0,
-            light_orbit_rad: 0.0,
+            exposure: options.exposure,
+            time_scale: options.time_scale,
+            simulated_julian_day: current_julian_day(),
             elapsed_time_s: 0.0,
             solar_system_bodies,
             solar_system_positions,
+            body_orientations,
             selected_body_index: None,
             runtime,
             campaign_name: scene.campaign_name,
@@ -1602,8 +1720,8 @@ impl RenderState {
             WindowEvent::CursorMoved { position, .. } => {
                 if self.input.mouse_drag_active {
                     if let Some((last_x, last_y)) = self.input.last_cursor {
-                        let dx = (position.x - last_x) as f64;
-                        let dy = (position.y - last_y) as f64;
+                        let dx = position.x - last_x;
+                        let dy = position.y - last_y;
                         self.camera.yaw += dx * 0.0042;
                         self.camera.pitch -= dy * 0.0038;
                     }
@@ -1635,18 +1753,16 @@ impl RenderState {
                             KeyCode::Space => self.paused = !self.paused,
                             KeyCode::KeyG => self.show_guides = !self.show_guides,
                             KeyCode::Equal | KeyCode::NumpadAdd => {
-                                self.atmosphere_strength = (self.atmosphere_strength + 0.05).min(1.5);
+                                self.exposure = (self.exposure * 1.25).min(64.0);
                             }
                             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                                self.atmosphere_strength = (self.atmosphere_strength - 0.05).max(0.0);
+                                self.exposure = (self.exposure / 1.25).max(0.02);
                             }
                             KeyCode::BracketRight => {
-                                self.planet_rotation_deg_per_s =
-                                    (self.planet_rotation_deg_per_s + 0.5).min(30.0);
+                                self.time_scale = (self.time_scale * 4.0).min(4.0e7);
                             }
                             KeyCode::BracketLeft => {
-                                self.planet_rotation_deg_per_s =
-                                    (self.planet_rotation_deg_per_s - 0.5).max(0.0);
+                                self.time_scale = (self.time_scale / 4.0).max(1.0);
                             }
                             KeyCode::KeyR => self.camera.reset(),
                             KeyCode::KeyH => print_controls(),
@@ -1696,9 +1812,8 @@ impl RenderState {
         self.camera.distance = self.camera.distance.clamp(0.000001, 120.0);
 
         if !self.paused {
-            self.planet_rotation_rad += self.planet_rotation_deg_per_s.to_radians() * dt_s as f32;
-            self.light_orbit_rad += 0.16 * dt_s as f32;
             self.elapsed_time_s += dt_s as f32;
+            self.simulated_julian_day += dt_s * self.time_scale / 86_400.0;
         }
 
         let aspect = self.config.width as f32 / self.config.height as f32;
@@ -1715,10 +1830,17 @@ impl RenderState {
             eye.z as f32,
             0.0,
         ];
-        self.frame_uniform.body_time_s = self.elapsed_time_s;
+        self.frame_uniform.shape_params[2] = self.exposure;
 
-        let julian_day = current_julian_day();
-        self.solar_system_positions = compute_solar_system_positions(&self.solar_system_bodies, julian_day);
+        let julian_day = self.simulated_julian_day;
+        self.solar_system_positions =
+            compute_scene_positions(&self.solar_system_bodies, julian_day);
+        self.body_orientations = self
+            .solar_system_bodies
+            .iter()
+            .map(|body| evaluate_body_orientation(&body.rotation, julian_day))
+            .collect();
+
         if let Some(index) = self.selected_body_index {
             if let Some(position) = self.solar_system_positions.get(index) {
                 self.camera.target = DVec3::new(position.x as f64, position.y as f64, position.z as f64);
@@ -1730,7 +1852,7 @@ impl RenderState {
             self.title_last_update = Instant::now();
         }
 
-        self.operations.chart_refresh_timer_s -= dt_s as f64;
+        self.operations.chart_refresh_timer_s -= dt_s;
         if self.operations.chart.is_none() || self.operations.chart_refresh_timer_s <= 0.0 {
             self.operations.chart_refresh_timer_s = SKY_CHART_REFRESH_S;
             if self.operations.follow_clock || self.operations.chart.is_none() {
@@ -1739,7 +1861,7 @@ impl RenderState {
         }
 
         if self.science.auto_refresh {
-            self.science.refresh_timer_s -= dt_s as f64;
+            self.science.refresh_timer_s -= dt_s;
             if self.science.refresh_timer_s <= 0.0 {
                 self.science.refresh_timer_s = 2.0;
                 self.refresh_frame_directory();
@@ -1764,7 +1886,7 @@ impl RenderState {
 
         if self.operations.show_solar_system {
             let julian_day = self.operations.chart_julian_day();
-            let positions = compute_solar_system_positions(&self.solar_system_bodies, julian_day);
+            let positions = compute_scene_positions(&self.solar_system_bodies, julian_day);
             let earth_index = self
                 .solar_system_bodies
                 .iter()
@@ -2039,7 +2161,6 @@ impl RenderState {
             textures_delta,
             shapes,
             pixels_per_point,
-            viewport_output: _,
             ..
         } = full_output;
 
@@ -3197,16 +3318,27 @@ impl RenderState {
                     .id_source("simulator_scroll")
                     .show(ui, |ui| {
                         ui.label(RichText::new("Moteur temps reel").strong());
-                        ui.checkbox(&mut self.paused, "pause de l'animation");
+                        ui.checkbox(&mut self.paused, "figer le temps simule");
                         ui.checkbox(&mut self.show_guides, "guides 3D");
+                        ui.checkbox(&mut self.show_atmospheres, "enveloppes atmospheriques");
+                        ui.checkbox(&mut self.show_rings, "systemes d'anneaux");
                         ui.add(
-                            egui::Slider::new(&mut self.atmosphere_strength, 0.0..=1.5)
-                                .text("enveloppes atmospheriques"),
+                            egui::Slider::new(&mut self.exposure, 0.02..=64.0)
+                                .logarithmic(true)
+                                .text("exposition d'affichage"),
                         );
                         ui.add(
-                            egui::Slider::new(&mut self.planet_rotation_deg_per_s, 0.0..=30.0)
-                                .text("rotation propre (deg/s)"),
+                            egui::Slider::new(&mut self.time_scale, 1.0..=4.0e7)
+                                .logarithmic(true)
+                                .text("echelle de temps (x)"),
                         );
+                        ui.label(format!(
+                            "date simulee: JJ {:.5}",
+                            self.simulated_julian_day
+                        ));
+                        if ui.button("Resynchroniser sur l'heure reelle").clicked() {
+                            self.simulated_julian_day = current_julian_day();
+                        }
 
                         ui.separator();
                         ui.label(RichText::new("Camera").strong());
@@ -3220,17 +3352,92 @@ impl RenderState {
                         ui.label(RichText::new("Corps celestes").strong());
                         ui.label(format!("{} corps simules", self.solar_system_bodies.len()));
                         if let Some(index) = self.selected_body_index {
-                            let body = &self.solar_system_bodies[index];
+                            let body = self.solar_system_bodies[index];
+                            let orientation = self.body_orientations[index];
                             let position = self.solar_system_positions[index];
-                            ui.label(format!("selection: {}", body.name));
+                            ui.label(format!("selection: {} ({})", body.name, body.class.label()));
                             ui.label(format!(
-                                "rayon {:.0} km",
-                                body.radius_scene as f64 * KM_PER_AU / AU_TO_SCENE_UNITS
+                                "rayon equatorial {:.1} km, polaire {:.1} km",
+                                body.equatorial_radius_km,
+                                body.polar_radius_km()
+                            ));
+                            ui.label(format!("aplatissement {:.5}", body.flattening));
+                            ui.label(format!("albedo geometrique {:.3}", body.geometric_albedo));
+                            ui.label(format!(
+                                "periode siderale {}",
+                                format_rotation_period(body.rotation.sidereal_period_days())
                             ));
                             ui.label(format!(
-                                "distance heliocentrique {:.4} ua",
-                                (position.length() as f64) / AU_TO_SCENE_UNITS
+                                "pole IAU: AD {:.3} deg, DEC {:.3} deg",
+                                orientation.pole_ra_deg, orientation.pole_dec_deg
                             ));
+                            ui.label(format!(
+                                "meridien origine W = {:.3} deg",
+                                orientation.prime_meridian_deg
+                            ));
+                            if !orientation.pole_constrained {
+                                ui.colored_label(
+                                    Color32::from_rgb(240, 180, 90),
+                                    "axe de rotation non contraint par l'IAU",
+                                );
+                            }
+                            if body.texture_asset.is_none() {
+                                ui.colored_label(
+                                    Color32::from_rgb(240, 180, 90),
+                                    "aucune carte de surface publiee: relief procedural",
+                                );
+                            }
+                            if let Some(ring) = body.ring {
+                                ui.label(format!(
+                                    "anneaux {:.0} - {:.0} km, tau {:.3}",
+                                    ring.inner_radius_km,
+                                    ring.outer_radius_km,
+                                    ring.normal_optical_depth
+                                ));
+                            }
+                            let distance_au = position.length() as f64 / AU_TO_SCENE_UNITS;
+                            ui.label(format!("distance au Soleil {distance_au:.5} ua"));
+
+                            match body.orbit {
+                                OrbitModel::Fixed => {
+                                    ui.label("origine du repere heliocentrique");
+                                }
+                                OrbitModel::Heliocentric(orbit) => {
+                                    ui.label(format!(
+                                        "orbite: a = {:.6} ua, e = {:.5}, i = {:.3} deg",
+                                        orbit.semi_major_axis_au,
+                                        orbit.eccentricity,
+                                        orbit.inclination_deg
+                                    ));
+                                    ui.label(format!(
+                                        "periode orbitale {:.3} jours",
+                                        orbit.orbital_period_days
+                                    ));
+                                }
+                                OrbitModel::Satellite(orbit) => {
+                                    ui.label(format!(
+                                        "satellite de {}: a = {:.0} km, e = {:.5}, i = {:.3} deg",
+                                        orbit.parent,
+                                        orbit.semi_major_axis_km,
+                                        orbit.eccentricity,
+                                        orbit.inclination_deg
+                                    ));
+                                    ui.label(format!(
+                                        "periode {:.6} jours, plan de reference {}",
+                                        orbit.sidereal_period_days.abs(),
+                                        match orbit.reference_plane {
+                                            ReferencePlane::Ecliptic => "ecliptique",
+                                            ReferencePlane::ParentEquator => "equateur du parent",
+                                        }
+                                    ));
+                                    if !orbit.epoch_phase_constrained {
+                                        ui.colored_label(
+                                            Color32::from_rgb(240, 180, 90),
+                                            "phase orbitale a l'epoque non sourcee",
+                                        );
+                                    }
+                                }
+                            }
                         }
 
                         let mut focus_index: Option<usize> = None;
@@ -3343,31 +3550,167 @@ impl RenderState {
             .asin()
             .clamp(-(FRAC_PI_2 as f64) + 0.02, (FRAC_PI_2 as f64) - 0.02);
 
-        let earth_radius = self.solar_system_bodies[earth_index].radius_scene as f64;
+        let earth_radius = self.solar_system_bodies[earth_index].equatorial_radius_au();
         self.camera.distance = (earth_radius * 6.0).max(0.00005);
         self.camera.near_plane = (earth_radius * 0.02).max(1e-8) as f32;
         self.selected_body_index = Some(earth_index);
     }
 
-    fn body_frame_uniform(&self, body: &CelestialBody, position: Vec3) -> FrameUniform {
-        let rotation = Mat4::from_rotation_y(self.planet_rotation_rad * body.rotation_multiplier);
-        let model = Mat4::from_translation(position) * rotation * Mat4::from_scale(Vec3::splat(body.radius_scene));
+    /// Body-fixed frame of a catalogued body, built from its IAU pole and prime meridian.
+    /// Returns the model matrix and the matching normal matrix, the latter accounting for
+    /// the polar flattening applied along the spin axis.
+    fn body_model_matrices(
+        body: &SolarSystemBody,
+        orientation: &BodyOrientation,
+        position: Vec3,
+        radius_scale: f32,
+        apply_flattening: bool,
+    ) -> (Mat4, Mat4) {
+        let pole_ecliptic = pole_direction_ecliptic(orientation);
+        // Scene axes: X and Z span the ecliptic plane, Y is the ecliptic normal.
+        let pole = Vec3::new(
+            pole_ecliptic[0] as f32,
+            pole_ecliptic[2] as f32,
+            pole_ecliptic[1] as f32,
+        )
+        .normalize_or_zero();
+
+        // The IAU node of the body equator lies at right ascension alpha0 + 90 degrees on
+        // the ICRF equator; the prime meridian angle W is measured from it.
+        let node_direction = equatorial_to_scene_direction(orientation.pole_ra_deg + 90.0, 0.0);
+        let node = Vec3::new(
+            node_direction.x as f32,
+            node_direction.y as f32,
+            node_direction.z as f32,
+        );
+        let node = (node - pole * node.dot(pole)).normalize_or_zero();
+
+        let prime_meridian = (orientation.prime_meridian_deg as f32).to_radians();
+        let x_axis = node * prime_meridian.cos() + pole.cross(node) * prime_meridian.sin();
+        let y_axis = pole;
+        let z_axis = x_axis.cross(y_axis);
+
+        let basis = Mat4::from_cols(
+            x_axis.extend(0.0),
+            y_axis.extend(0.0),
+            z_axis.extend(0.0),
+            glam::Vec4::W,
+        );
+
+        let equatorial = (body.equatorial_radius_au() * AU_TO_SCENE_UNITS) as f32 * radius_scale;
+        let polar = if apply_flattening {
+            equatorial * (1.0 - body.flattening as f32)
+        } else {
+            equatorial
+        };
+
+        let model = Mat4::from_translation(position)
+            * basis
+            * Mat4::from_scale(Vec3::new(equatorial, polar, equatorial));
+        // Inverse transpose of an orthonormal basis times a diagonal scale.
+        let normal_matrix = basis
+            * Mat4::from_scale(Vec3::new(
+                1.0 / equatorial,
+                1.0 / polar.max(f32::MIN_POSITIVE),
+                1.0 / equatorial,
+            ));
+
+        (model, normal_matrix)
+    }
+
+    fn body_frame_uniform(
+        &self,
+        body: &SolarSystemBody,
+        orientation: &BodyOrientation,
+        position: Vec3,
+    ) -> FrameUniform {
+        let (model, normal_matrix) =
+            Self::body_model_matrices(body, orientation, position, 1.0, true);
+
+        let distance_au = (position.length() as f64 / AU_TO_SCENE_UNITS).max(1.0e-6);
+        let is_emissive = matches!(body.class, BodyClass::Star);
+        let irradiance = if is_emissive {
+            1.0
+        } else {
+            (1.0 / (distance_au * distance_au)) as f32
+        };
         let light_dir = if position.length_squared() > f32::EPSILON {
             (-position).normalize()
         } else {
-            Vec3::new(0.7, 0.35, 0.61).normalize()
+            Vec3::Y
+        };
+
+        // Cloud advection phase: zonal wind drift accumulated since the epoch.
+        let cloud_phase = ((body.zonal_wind_drift_deg_per_day()
+            * (self.simulated_julian_day - J2000_JULIAN_DAY))
+            .rem_euclid(360.0)) as f32;
+
+        let shell_thickness = if self.show_atmospheres && body.has_atmosphere() {
+            // Five scale heights capture the bulk of the scattering column.
+            (5.0 * body.atmosphere_scale_height_km / body.equatorial_radius_km).min(0.5) as f32
+        } else {
+            0.0
         };
 
         let mut frame_uniform = self.frame_uniform;
         frame_uniform.model = model.to_cols_array_2d();
-        frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
-        frame_uniform.planet_color = body.surface_color;
-        frame_uniform.atmosphere_color = body.atmosphere_color;
-        frame_uniform.atmosphere_strength = body.atmosphere_strength * self.atmosphere_strength.max(0.05);
-        frame_uniform.specular_strength = body.specular_strength;
-        frame_uniform.interior_motion = 0.12 + body.rotation_multiplier.abs() * 0.05;
-        frame_uniform.atmosphere_motion = 0.35 + body.atmosphere_strength * 2.2;
-        frame_uniform.surface_texture_weight = body.surface_texture_weight;
+        frame_uniform.normal_matrix = normal_matrix.to_cols_array_2d();
+        frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, irradiance];
+        frame_uniform.base_color = [
+            body.base_color[0],
+            body.base_color[1],
+            body.base_color[2],
+            body.geometric_albedo as f32,
+        ];
+        frame_uniform.atmosphere_color = [
+            body.atmosphere_color[0],
+            body.atmosphere_color[1],
+            body.atmosphere_color[2],
+            shell_thickness * 2.0,
+        ];
+        frame_uniform.surface_params = [
+            if body.texture_asset.is_some() { 1.0 } else { 0.0 },
+            if is_emissive { 1.0 } else { 0.0 },
+            body_class_id(body.class),
+            cloud_phase.to_radians(),
+        ];
+        frame_uniform.shape_params = [
+            shell_thickness,
+            SOLAR_LIMB_DARKENING_U,
+            self.exposure,
+            body_specular_strength(body.class),
+        ];
+        frame_uniform
+    }
+
+    fn ring_frame_uniform(&self, ring: &RingDraw) -> FrameUniform {
+        let body = &self.solar_system_bodies[ring.body_index];
+        let orientation = &self.body_orientations[ring.body_index];
+        let position = self.solar_system_positions[ring.body_index];
+
+        // Rings share the equatorial plane of their planet; the mesh is scaled to the
+        // outer ring radius instead of the planet radius.
+        let radius_scale =
+            ring.outer_radius_scene / (body.equatorial_radius_au() * AU_TO_SCENE_UNITS) as f32;
+        let (model, normal_matrix) =
+            Self::body_model_matrices(body, orientation, position, radius_scale, false);
+
+        let distance_au = (position.length() as f64 / AU_TO_SCENE_UNITS).max(1.0e-6);
+        let irradiance = (1.0 / (distance_au * distance_au)) as f32;
+        let light_dir = if position.length_squared() > f32::EPSILON {
+            (-position).normalize()
+        } else {
+            Vec3::Y
+        };
+
+        let mut frame_uniform = self.frame_uniform;
+        frame_uniform.model = model.to_cols_array_2d();
+        frame_uniform.normal_matrix = normal_matrix.to_cols_array_2d();
+        frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, irradiance];
+        frame_uniform.base_color = [0.86, 0.80, 0.68, RING_PARTICLE_ALBEDO];
+        frame_uniform.atmosphere_color = [0.0, 0.0, 0.0, ring.geometry.normal_optical_depth as f32];
+        frame_uniform.surface_params = [0.0, 0.0, 0.0, 0.0];
+        frame_uniform.shape_params = [ring.inner_radius_ratio, 0.0, self.exposure, 0.0];
         frame_uniform
     }
 
@@ -3433,7 +3776,7 @@ impl RenderState {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &self.depth.view,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
+                        load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
@@ -3464,9 +3807,10 @@ impl RenderState {
                 }
 
                 for body_index in 0..self.solar_system_bodies.len() {
-                    let body = self.solar_system_bodies[body_index].clone();
+                    let body = self.solar_system_bodies[body_index];
+                    let orientation = self.body_orientations[body_index];
                     let position = self.solar_system_positions[body_index];
-                    let frame_uniform = self.body_frame_uniform(&body, position);
+                    let frame_uniform = self.body_frame_uniform(&body, &orientation, position);
                     self.queue.write_buffer(
                         &self.body_frame_buffers[body_index],
                         0,
@@ -3482,7 +3826,7 @@ impl RenderState {
                     );
                     pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
 
-                    if body.atmosphere_strength > 0.001 {
+                    if self.show_atmospheres && body.has_atmosphere() && !matches!(body.class, BodyClass::Star) {
                         pass.set_pipeline(&self.atmosphere_pipeline);
                         pass.set_bind_group(0, &self.planet_bind_groups[body_index], &[]);
                         pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
@@ -3491,6 +3835,26 @@ impl RenderState {
                             wgpu::IndexFormat::Uint32,
                         );
                         pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+                    }
+                }
+
+                if self.show_rings {
+                    for ring_index in 0..self.ring_draws.len() {
+                        let frame_uniform = self.ring_frame_uniform(&self.ring_draws[ring_index]);
+                        self.queue.write_buffer(
+                            &self.ring_draws[ring_index].uniform_buffer,
+                            0,
+                            bytemuck::bytes_of(&frame_uniform),
+                        );
+
+                        pass.set_pipeline(&self.ring_pipeline);
+                        pass.set_bind_group(0, &self.ring_draws[ring_index].bind_group, &[]);
+                        pass.set_vertex_buffer(0, self.ring_vertex_buffer.slice(..));
+                        pass.set_index_buffer(
+                            self.ring_index_buffer.slice(..),
+                            wgpu::IndexFormat::Uint32,
+                        );
+                        pass.draw_indexed(0..self.ring_index_count, 0, 0..1);
                     }
                 }
             }
@@ -3528,31 +3892,27 @@ impl RenderState {
     }
 }
 
-fn load_planet_layer_textures(
+fn load_surface_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     asset_name: &str,
-) -> Result<PlanetLayerTextures, String> {
+) -> Result<SurfaceTexture, String> {
     let base_dir = Path::new("assets").join("textures").join(asset_name);
     let lod_names = ["lod0.ppm", "lod1.ppm", "lod2.ppm", "lod3.ppm"];
-    let lods: Vec<TextureLodImage> = lod_names
+    let lods: Vec<PpmImage> = lod_names
         .iter()
         .map(|name| load_ppm_rgb(&base_dir.join(name)))
         .collect::<Result<_, _>>()?;
 
-    let layer_texture = create_mipmapped_layer_texture(
+    let texture = create_mipmapped_surface_texture(
         device,
         queue,
-        "mars_body_multilayer_lod_texture",
+        &format!("{asset_name}_surface_map"),
         &lods,
     )?;
-    let layer_view = layer_texture.create_view(&wgpu::TextureViewDescriptor {
-        label: Some("mars_body_layer_view"),
-        dimension: Some(wgpu::TextureViewDimension::D2Array),
-        ..Default::default()
-    });
-    let layer_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("mars_body_lod_sampler"),
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("surface_map_sampler"),
         address_mode_u: wgpu::AddressMode::Repeat,
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -3562,30 +3922,74 @@ fn load_planet_layer_textures(
         ..Default::default()
     });
 
-    Ok(PlanetLayerTextures {
-        layer_view,
-        layer_sampler,
-    })
+    Ok(SurfaceTexture { view, sampler })
 }
 
-fn create_mipmapped_layer_texture(
+/// Single-texel neutral map bound to bodies that have no published surface map, so the
+/// shader can keep one bind group layout while flagging the absence of real imagery.
+fn create_neutral_surface_texture(device: &wgpu::Device, queue: &wgpu::Queue) -> SurfaceTexture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("neutral_surface_map"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[255u8, 255, 255, 255],
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(4),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("neutral_surface_sampler"),
+        ..Default::default()
+    });
+
+    SurfaceTexture { view, sampler }
+}
+
+fn create_mipmapped_surface_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     label: &str,
-    lods: &[TextureLodImage],
+    lods: &[PpmImage],
 ) -> Result<wgpu::Texture, String> {
     let Some(base_lod) = lods.first() else {
-        return Err("missing Mars texture LOD images".to_string());
+        return Err(format!("no LOD image supplied for '{label}'"));
     };
 
     for (index, lod) in lods.iter().enumerate() {
         if lod.rgb.len() != (lod.width as usize * lod.height as usize * 3) {
-            return Err(format!("invalid RGB data length for Mars LOD {index}"));
+            return Err(format!("invalid RGB data length for '{label}' LOD {index}"));
         }
         if index > 0 {
             let previous = &lods[index - 1];
             if lod.width != previous.width / 2 || lod.height != previous.height / 2 {
-                return Err(format!("Mars LOD {index} is not half of previous level"));
+                return Err(format!("'{label}' LOD {index} is not half of the previous level"));
             }
         }
     }
@@ -3595,7 +3999,7 @@ fn create_mipmapped_layer_texture(
         size: wgpu::Extent3d {
             width: base_lod.width,
             height: base_lod.height,
-            depth_or_array_layers: PLANET_TEXTURE_LAYER_COUNT,
+            depth_or_array_layers: 1,
         },
         mip_level_count: lods.len() as u32,
         sample_count: 1,
@@ -3606,135 +4010,42 @@ fn create_mipmapped_layer_texture(
     });
 
     for (mip_level, lod) in lods.iter().enumerate() {
-        for layer in 0..PLANET_TEXTURE_LAYER_COUNT {
-            let rgba = build_mars_layer_rgba(lod, layer);
-            queue.write_texture(
-                wgpu::ImageCopyTexture {
-                    texture: &texture,
-                    mip_level: mip_level as u32,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &rgba,
-                wgpu::ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * lod.width),
-                    rows_per_image: Some(lod.height),
-                },
-                wgpu::Extent3d {
-                    width: lod.width,
-                    height: lod.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
+        let rgba = expand_rgb_to_rgba(lod);
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: mip_level as u32,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &rgba,
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * lod.width),
+                rows_per_image: Some(lod.height),
+            },
+            wgpu::Extent3d {
+                width: lod.width,
+                height: lod.height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     Ok(texture)
 }
 
-fn build_mars_layer_rgba(lod: &TextureLodImage, layer: u32) -> Vec<u8> {
+fn expand_rgb_to_rgba(lod: &PpmImage) -> Vec<u8> {
     let mut rgba = Vec::with_capacity(lod.width as usize * lod.height as usize * 4);
-    for pixel in lod.rgb.chunks_exact(3) {
-        let red = pixel[0] as f32;
-        let green = pixel[1] as f32;
-        let blue = pixel[2] as f32;
-        let luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255.0;
-
-        match layer {
-            0 => {
-                rgba.push((34.0 + 82.0 * luminance).round() as u8);
-                rgba.push((12.0 + 34.0 * luminance).round() as u8);
-                rgba.push((8.0 + 24.0 * luminance).round() as u8);
-                rgba.push(255);
-            }
-            1 => rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]),
-            2 => {
-                let dust_alpha = (32.0 + 116.0 * luminance).round() as u8;
-                rgba.push((180.0 + 42.0 * luminance).round() as u8);
-                rgba.push((112.0 + 38.0 * luminance).round() as u8);
-                rgba.push((72.0 + 24.0 * luminance).round() as u8);
-                rgba.push(dust_alpha);
-            }
-            _ => unreachable!("invalid Mars texture layer"),
-        }
+    for pixel in lod.rgb.as_chunks::<3>().0 {
+        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]);
     }
     rgba
 }
 
-fn load_ppm_rgb(path: &Path) -> Result<TextureLodImage, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|error| format!("failed to read Mars texture '{}': {error}", path.display()))?;
-    parse_ppm_rgb(&bytes).map_err(|error| format!("invalid Mars texture '{}': {error}", path.display()))
-}
-
-fn parse_ppm_rgb(bytes: &[u8]) -> Result<TextureLodImage, String> {
-    let mut cursor = 0usize;
-    let magic = next_ppm_token(bytes, &mut cursor).ok_or_else(|| "missing PPM magic".to_string())?;
-    if magic != "P6" {
-        return Err(format!("unsupported PPM magic '{magic}'"));
-    }
-
-    let width = next_ppm_token(bytes, &mut cursor)
-        .ok_or_else(|| "missing PPM width".to_string())?
-        .parse::<u32>()
-        .map_err(|error| format!("invalid PPM width: {error}"))?;
-    let height = next_ppm_token(bytes, &mut cursor)
-        .ok_or_else(|| "missing PPM height".to_string())?
-        .parse::<u32>()
-        .map_err(|error| format!("invalid PPM height: {error}"))?;
-    let max_value = next_ppm_token(bytes, &mut cursor)
-        .ok_or_else(|| "missing PPM max value".to_string())?
-        .parse::<u32>()
-        .map_err(|error| format!("invalid PPM max value: {error}"))?;
-    if width == 0 || height == 0 {
-        return Err("PPM dimensions must be non-zero".to_string());
-    }
-    if max_value != 255 {
-        return Err(format!("unsupported PPM max value {max_value}"));
-    }
-
-    if cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-        cursor += 1;
-    }
-
-    let expected = width as usize * height as usize * 3;
-    let remaining = bytes.len().saturating_sub(cursor);
-    if remaining != expected {
-        return Err(format!("expected {expected} RGB bytes, found {remaining}"));
-    }
-
-    Ok(TextureLodImage {
-        width,
-        height,
-        rgb: bytes[cursor..].to_vec(),
-    })
-}
-
-fn next_ppm_token(bytes: &[u8], cursor: &mut usize) -> Option<String> {
-    loop {
-        while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
-            *cursor += 1;
-        }
-        if *cursor >= bytes.len() || bytes[*cursor] != b'#' {
-            break;
-        }
-        while *cursor < bytes.len() && bytes[*cursor] != b'\n' {
-            *cursor += 1;
-        }
-    }
-
-    let start = *cursor;
-    while *cursor < bytes.len() && !bytes[*cursor].is_ascii_whitespace() {
-        *cursor += 1;
-    }
-    if start == *cursor {
-        return None;
-    }
-
-    std::str::from_utf8(&bytes[start..*cursor])
-        .ok()
-        .map(str::to_string)
+fn load_ppm_rgb(path: &Path) -> Result<PpmImage, String> {
+    let display = path.display().to_string();
+    read_ppm_file(&display)
 }
 
 fn create_vertex_buffer_with_fallback<T: Pod>(
@@ -3756,6 +4067,48 @@ fn create_vertex_buffer_with_fallback<T: Pod>(
             contents: bytemuck::cast_slice(data),
             usage,
         })
+    }
+}
+
+/// Human readable sidereal rotation period, with the retrograde sense made explicit.
+fn format_rotation_period(period_days: f64) -> String {
+    if !period_days.is_finite() {
+        return "non definie".to_string();
+    }
+
+    let sense = if period_days < 0.0 {
+        " (retrograde)"
+    } else {
+        ""
+    };
+    let magnitude_hours = period_days.abs() * 24.0;
+    if magnitude_hours < 48.0 {
+        let hours = magnitude_hours.floor();
+        let minutes_total = (magnitude_hours - hours) * 60.0;
+        let minutes = minutes_total.floor();
+        let seconds = (minutes_total - minutes) * 60.0;
+        format!("{:.0} h {:02.0} min {:04.1} s{sense}", hours, minutes, seconds)
+    } else {
+        format!("{:.4} jours{sense}", period_days.abs())
+    }
+}
+
+fn body_class_id(class: BodyClass) -> f32 {    match class {
+        BodyClass::Star => 0.0,
+        BodyClass::TerrestrialPlanet => 1.0,
+        BodyClass::GasGiant => 2.0,
+        BodyClass::IceGiant => 3.0,
+        BodyClass::Satellite => 1.0,
+        BodyClass::MinorPlanet => 1.0,
+    }
+}
+
+/// Specular lobe strength: only bodies with a liquid or icy surface show a glint.
+fn body_specular_strength(class: BodyClass) -> f32 {
+    match class {
+        BodyClass::TerrestrialPlanet => 0.05,
+        BodyClass::Satellite => 0.02,
+        _ => 0.0,
     }
 }
 
@@ -3868,8 +4221,21 @@ fn build_frame_color_image(
     image
 }
 
-fn equatorial_to_scene_direction(ra_deg: f64, dec_deg: f64) -> DVec3 {
-    let ra_rad = ra_deg.to_radians();
+/// Right-handed perspective projection mapping the near plane to depth 1 and the far
+/// plane to depth 0. Reverse-Z keeps float depth precision usable over the 1e-6 au to
+/// several-hundred-au range spanned by the solar system scene.
+fn reverse_z_perspective_rh(fov_y_rad: f64, aspect: f64, near: f64, far: f64) -> DMat4 {
+    let focal = 1.0 / (fov_y_rad * 0.5).tan();
+    let depth_span = far - near;
+    DMat4::from_cols(
+        DVec4::new(focal / aspect, 0.0, 0.0, 0.0),
+        DVec4::new(0.0, focal, 0.0, 0.0),
+        DVec4::new(0.0, 0.0, near / depth_span, -1.0),
+        DVec4::new(0.0, 0.0, far * near / depth_span, 0.0),
+    )
+}
+
+fn equatorial_to_scene_direction(ra_deg: f64, dec_deg: f64) -> DVec3 {    let ra_rad = ra_deg.to_radians();
     let dec_rad = dec_deg.to_radians();
     let x_eq = dec_rad.cos() * ra_rad.cos();
     let y_eq = dec_rad.cos() * ra_rad.sin();
@@ -3892,17 +4258,17 @@ fn print_controls() {
     println!("mouse left drag: orbit camera");
     println!("wheel / Q / E   : zoom in/out");
     println!("W/A/S/D         : orbit camera");
-    println!("space           : pause/resume animation");
+    println!("space           : freeze/resume simulated time");
     println!("G               : toggle target guide lines");
-    println!("[ and ]         : decrease/increase planet rotation speed");
-    println!("- and +         : decrease/increase atmosphere strength");
+    println!("[ and ]         : decrease/increase the simulated time acceleration");
+    println!("- and +         : decrease/increase the display exposure");
     println!("R               : reset camera");
     println!("H               : print controls");
 }
 
 fn build_title(state: &RenderState) -> String {
     format!(
-        "{} | campaign={} phase={} ready={} | targets={} | dist={:.2} fov={:.1}deg | atmosphere={:.2} rot={:.1}deg/s | guides={} paused={}",
+        "{} | campaign={} phase={} ready={} | targets={} | dist={:.6}au fov={:.1}deg | JJ={:.5} x{:.0} | exposition={:.2} | guides={} fige={}",
         state.runtime.app_name,
         state.runtime.config_name,
         state.runtime.phase,
@@ -3910,8 +4276,9 @@ fn build_title(state: &RenderState) -> String {
         state.target_count,
         state.camera.distance,
         state.camera.fov_deg,
-        state.atmosphere_strength,
-        state.planet_rotation_deg_per_s,
+        state.simulated_julian_day,
+        state.time_scale,
+        state.exposure,
         state.show_guides,
         state.paused,
     )
@@ -4016,17 +4383,6 @@ fn parse_cli_args(args: &[String]) -> CliOptions {
                 });
                 i += 2;
             }
-            "--planet-radius" => {
-                let Some(value) = args.get(i + 1) else {
-                    eprintln!("missing value after --planet-radius");
-                    std::process::exit(1);
-                };
-                options.planet_radius = value.parse::<f32>().unwrap_or_else(|_| {
-                    eprintln!("invalid --planet-radius value: '{value}'");
-                    std::process::exit(1);
-                });
-                i += 2;
-            }
             "--star-radius" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!("missing value after --star-radius");
@@ -4038,24 +4394,24 @@ fn parse_cli_args(args: &[String]) -> CliOptions {
                 });
                 i += 2;
             }
-            "--rotation-speed" => {
+            "--time-scale" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("missing value after --rotation-speed");
+                    eprintln!("missing value after --time-scale");
                     std::process::exit(1);
                 };
-                options.planet_rotation_deg_per_s = value.parse::<f32>().unwrap_or_else(|_| {
-                    eprintln!("invalid --rotation-speed value: '{value}'");
+                options.time_scale = value.parse::<f64>().unwrap_or_else(|_| {
+                    eprintln!("invalid --time-scale value: '{value}'");
                     std::process::exit(1);
                 });
                 i += 2;
             }
-            "--atmosphere" => {
+            "--display-exposure" => {
                 let Some(value) = args.get(i + 1) else {
-                    eprintln!("missing value after --atmosphere");
+                    eprintln!("missing value after --display-exposure");
                     std::process::exit(1);
                 };
-                options.atmosphere_strength = value.parse::<f32>().unwrap_or_else(|_| {
-                    eprintln!("invalid --atmosphere value: '{value}'");
+                options.exposure = value.parse::<f32>().unwrap_or_else(|_| {
+                    eprintln!("invalid --display-exposure value: '{value}'");
                     std::process::exit(1);
                 });
                 i += 2;
@@ -4097,8 +4453,16 @@ fn parse_cli_args(args: &[String]) -> CliOptions {
         eprintln!("invalid near/far planes: near must be > 0 and far > near");
         std::process::exit(1);
     }
-    if options.planet_radius <= 0.0 || options.star_shell_radius <= options.planet_radius {
-        eprintln!("invalid scene scale: star radius must be larger than planet radius");
+    if options.star_shell_radius <= 1.0 {
+        eprintln!("--star-radius must be larger than 1 au");
+        std::process::exit(1);
+    }
+    if options.exposure <= 0.0 {
+        eprintln!("--display-exposure must be strictly positive");
+        std::process::exit(1);
+    }
+    if options.time_scale < 1.0 {
+        eprintln!("--time-scale must be at least 1 (real time)");
         std::process::exit(1);
     }
 
@@ -4119,22 +4483,21 @@ fn print_usage() {
     println!("  --width <px>               window width (default: 1600)");
     println!("  --height <px>              window height (default: 900)");
     println!("  --fov <deg>                camera field of view in degrees (default: 56)");
-    println!("  --near <value>             near clipping plane (default: 0.1)");
-    println!("  --far <value>              far clipping plane (default: 400)");
+    println!("  --near <value>             near clipping plane in au (default: 0.000001)");
+    println!("  --far <value>              far clipping plane in au (default: 400)");
     println!();
     println!("3D scene:");
-    println!("  --planet-radius <value>    planet radius in scene units (default: 1)");
-    println!("  --star-radius <value>      radius of target star shell (default: 45)");
-    println!("  --rotation-speed <deg/s>   planet rotation speed (default: 7.5)");
-    println!("  --atmosphere <value>       atmosphere rim strength (default: 0.65)");
+    println!("  --star-radius <value>      radius of the target star shell in au (default: 45)");
+    println!("  --display-exposure <value> display exposure of the tone mapper (default: 1.6)");
+    println!("  --time-scale <factor>      simulated time acceleration, 1 = real time");
     println!("  --no-guides                disable guide lines from origin to targets");
     println!();
     println!("Interactive controls:");
     println!("  mouse drag / WASD          orbit camera");
     println!("  wheel, Q, E                zoom");
-    println!("  space                      pause/resume animation");
-    println!("  [ and ]                    decrease/increase rotation speed");
-    println!("  - and +                    decrease/increase atmosphere");
+    println!("  space                      freeze/resume simulated time");
+    println!("  [ and ]                    decrease/increase the time acceleration");
+    println!("  - and +                    decrease/increase the display exposure");
     println!("  G                          toggle guide lines");
     println!("  R                          reset camera");
     println!("  H                          print controls to terminal");
@@ -4148,205 +4511,27 @@ fn current_julian_day() -> f64 {
     UNIX_EPOCH_JULIAN_DAY + unix_seconds / 86_400.0
 }
 
-fn scene_radius_from_km(radius_km: f64) -> f32 {
-    (radius_km / KM_PER_AU * AU_TO_SCENE_UNITS) as f32
+fn selected_body_camera_distance(body: &SolarSystemBody) -> f64 {
+    (body.equatorial_radius_au() * AU_TO_SCENE_UNITS * 8.0).max(0.00005)
 }
 
-fn selected_body_camera_distance(body: &CelestialBody) -> f64 {
-    (body.radius_scene as f64 * 8.0).max(0.00005)
+fn selected_body_near_plane(body: &SolarSystemBody) -> f32 {
+    ((body.equatorial_radius_au() * AU_TO_SCENE_UNITS * 0.02) as f32).max(0.00000001)
 }
 
-fn selected_body_near_plane(body: &CelestialBody) -> f32 {
-    (body.radius_scene * 0.02).max(0.00000001)
-}
-
-fn solve_kepler(mean_anomaly_rad: f64, eccentricity: f64) -> f64 {
-    let mut eccentric_anomaly = mean_anomaly_rad;
-    for _ in 0..8 {
-        let delta = (eccentric_anomaly - eccentricity * eccentric_anomaly.sin() - mean_anomaly_rad)
-            / (1.0 - eccentricity * eccentric_anomaly.cos());
-        eccentric_anomaly -= delta;
-        if delta.abs() < 1e-12 {
-            break;
-        }
-    }
-    eccentric_anomaly
-}
-
-fn heliocentric_position(elements: OrbitalElements, julian_day: f64) -> Vec3 {
-    let days_since_j2000 = julian_day - J2000_JULIAN_DAY;
-    let mean_anomaly_deg = elements.mean_longitude_deg
-        - elements.longitude_perihelion_deg
-        + 360.0 * days_since_j2000 / elements.orbital_period_days;
-    let mean_anomaly_rad = mean_anomaly_deg.to_radians().rem_euclid(std::f64::consts::TAU);
-    let eccentric_anomaly = solve_kepler(mean_anomaly_rad, elements.eccentricity);
-    let xv = eccentric_anomaly.cos() - elements.eccentricity;
-    let yv = (1.0 - elements.eccentricity * elements.eccentricity).sqrt() * eccentric_anomaly.sin();
-    let true_anomaly = yv.atan2(xv);
-    let radius_au = elements.semi_major_axis_au * (1.0 - elements.eccentricity * eccentric_anomaly.cos());
-
-    let longitude_node = elements.longitude_ascending_node_deg.to_radians();
-    let inclination = elements.inclination_deg.to_radians();
-    let argument_perihelion = (elements.longitude_perihelion_deg - elements.longitude_ascending_node_deg).to_radians();
-    let argument = true_anomaly + argument_perihelion;
-
-    let x = radius_au * (longitude_node.cos() * argument.cos() - longitude_node.sin() * argument.sin() * inclination.cos());
-    let y = radius_au * (argument.sin() * inclination.sin());
-    let z = radius_au * (longitude_node.sin() * argument.cos() + longitude_node.cos() * argument.sin() * inclination.cos());
-    Vec3::new((x * AU_TO_SCENE_UNITS) as f32, (y * AU_TO_SCENE_UNITS) as f32, (z * AU_TO_SCENE_UNITS) as f32)
-}
-
-fn circular_relative_position(
-    semi_major_axis_au: f64,
-    orbital_period_days: f64,
-    inclination_deg: f64,
-    mean_longitude_deg: f64,
-    julian_day: f64,
-) -> Vec3 {
-    let days_since_j2000 = julian_day - J2000_JULIAN_DAY;
-    let phase = (mean_longitude_deg + 360.0 * days_since_j2000 / orbital_period_days).to_radians();
-    let inclination = inclination_deg.to_radians();
-    let x = semi_major_axis_au * phase.cos();
-    let y = semi_major_axis_au * phase.sin() * inclination.sin();
-    let z = semi_major_axis_au * phase.sin() * inclination.cos();
-    Vec3::new((x * AU_TO_SCENE_UNITS) as f32, (y * AU_TO_SCENE_UNITS) as f32, (z * AU_TO_SCENE_UNITS) as f32)
-}
-
-fn compute_solar_system_positions(bodies: &[CelestialBody], julian_day: f64) -> Vec<Vec3> {
-    let mut positions = Vec::with_capacity(bodies.len());
-    for body in bodies {
-        let position = match body.orbit {
-            BodyOrbit::FixedSun => Vec3::ZERO,
-            BodyOrbit::Heliocentric(elements) => heliocentric_position(elements, julian_day),
-            BodyOrbit::Planetocentric {
-                parent_index,
-                semi_major_axis_au,
-                orbital_period_days,
-                inclination_deg,
-                mean_longitude_deg,
-            } => positions[parent_index]
-                + circular_relative_position(
-                    semi_major_axis_au,
-                    orbital_period_days,
-                    inclination_deg,
-                    mean_longitude_deg,
-                    julian_day,
-                ),
-            BodyOrbit::BeltObject {
-                semi_major_axis_au,
-                eccentricity,
-                inclination_deg,
-                longitude_ascending_node_deg,
-                longitude_perihelion_deg,
-                mean_longitude_deg,
-                orbital_period_days,
-            } => heliocentric_position(
-                OrbitalElements {
-                    semi_major_axis_au,
-                    eccentricity,
-                    inclination_deg,
-                    longitude_ascending_node_deg,
-                    longitude_perihelion_deg,
-                    mean_longitude_deg,
-                    orbital_period_days,
-                },
-                julian_day,
-            ),
-        };
-        positions.push(position);
-    }
-    positions
-}
-
-fn build_solar_system_bodies() -> Vec<CelestialBody> {
-    let mut bodies = Vec::new();
-    bodies.push(CelestialBody {
-        name: "Sun",
-        texture_asset: "jupiter",
-        orbit: BodyOrbit::FixedSun,
-        radius_scene: scene_radius_from_km(696_340.0),
-        rotation_multiplier: 0.15,
-        surface_color: [1.0, 0.78, 0.35, 1.0],
-        atmosphere_color: [1.0, 0.55, 0.18, 1.0],
-        atmosphere_strength: 0.32,
-        specular_strength: 0.0,
-        surface_texture_weight: 0.02,
-    });
-
-    let planets = [
-        ("Mercury", "mercury", scene_radius_from_km(2_439.7), 1.8, [0.55, 0.50, 0.44, 1.0], [0.20, 0.18, 0.15, 1.0], 0.0, 0.02, 0.92, OrbitalElements { semi_major_axis_au: 0.387098, eccentricity: 0.205630, inclination_deg: 7.00487, longitude_ascending_node_deg: 48.33167, longitude_perihelion_deg: 77.45645, mean_longitude_deg: 252.25084, orbital_period_days: 87.9691 }),
-        ("Venus", "venus", scene_radius_from_km(6_051.8), 0.9, [0.86, 0.68, 0.43, 1.0], [0.94, 0.75, 0.46, 1.0], 0.48, 0.01, 0.94, OrbitalElements { semi_major_axis_au: 0.723332, eccentricity: 0.006772, inclination_deg: 3.39471, longitude_ascending_node_deg: 76.68069, longitude_perihelion_deg: 131.53298, mean_longitude_deg: 181.97973, orbital_period_days: 224.701 }),
-        ("Earth", "earth", scene_radius_from_km(6_371.0), 1.0, [0.48, 0.62, 0.84, 1.0], [0.42, 0.64, 1.0, 1.0], 0.38, 0.12, 0.96, OrbitalElements { semi_major_axis_au: 1.000000, eccentricity: 0.016710, inclination_deg: 0.00005, longitude_ascending_node_deg: -11.26064, longitude_perihelion_deg: 102.94719, mean_longitude_deg: 100.46435, orbital_period_days: 365.256 }),
-        ("Mars", "mars", scene_radius_from_km(3_389.5), 0.98, [0.62, 0.25, 0.12, 1.0], [0.48, 0.22, 0.12, 1.0], 0.18, 0.045, 0.97, OrbitalElements { semi_major_axis_au: 1.523662, eccentricity: 0.093412, inclination_deg: 1.85061, longitude_ascending_node_deg: 49.57854, longitude_perihelion_deg: 336.04084, mean_longitude_deg: 355.45332, orbital_period_days: 686.980 }),
-        ("Jupiter", "jupiter", scene_radius_from_km(69_911.0), 2.4, [0.78, 0.62, 0.46, 1.0], [0.72, 0.58, 0.44, 1.0], 0.16, 0.08, 0.96, OrbitalElements { semi_major_axis_au: 5.203363, eccentricity: 0.048393, inclination_deg: 1.30530, longitude_ascending_node_deg: 100.55615, longitude_perihelion_deg: 14.75385, mean_longitude_deg: 34.40438, orbital_period_days: 4332.589 }),
-        ("Saturn", "saturn", scene_radius_from_km(58_232.0), 2.2, [0.82, 0.72, 0.50, 1.0], [0.74, 0.66, 0.48, 1.0], 0.12, 0.06, 0.96, OrbitalElements { semi_major_axis_au: 9.537070, eccentricity: 0.054151, inclination_deg: 2.48446, longitude_ascending_node_deg: 113.71504, longitude_perihelion_deg: 92.43194, mean_longitude_deg: 49.94432, orbital_period_days: 10759.22 }),
-        ("Uranus", "uranus", scene_radius_from_km(25_362.0), 1.7, [0.52, 0.78, 0.82, 1.0], [0.42, 0.72, 0.86, 1.0], 0.18, 0.04, 0.96, OrbitalElements { semi_major_axis_au: 19.191264, eccentricity: 0.047168, inclination_deg: 0.76986, longitude_ascending_node_deg: 74.22988, longitude_perihelion_deg: 170.96424, mean_longitude_deg: 313.23218, orbital_period_days: 30685.4 }),
-        ("Neptune", "neptune", scene_radius_from_km(24_622.0), 1.8, [0.36, 0.48, 0.86, 1.0], [0.24, 0.38, 0.82, 1.0], 0.20, 0.05, 0.96, OrbitalElements { semi_major_axis_au: 30.068963, eccentricity: 0.008586, inclination_deg: 1.76917, longitude_ascending_node_deg: 131.72169, longitude_perihelion_deg: 44.97135, mean_longitude_deg: 304.88003, orbital_period_days: 60190.0 }),
-    ];
-    for (name, texture_asset, radius_scene, rotation_multiplier, surface_color, atmosphere_color, atmosphere_strength, specular_strength, surface_texture_weight, orbit) in planets {
-        bodies.push(CelestialBody { name, texture_asset, orbit: BodyOrbit::Heliocentric(orbit), radius_scene, rotation_multiplier, surface_color, atmosphere_color, atmosphere_strength, specular_strength, surface_texture_weight });
-    }
-
-    let moons = [
-        ("Moon", 3usize, 0.00257, 27.3217, 5.14, 125.1, scene_radius_from_km(1_737.4)),
-        ("Phobos", 4usize, 0.000063, 0.3189, 1.1, 20.0, scene_radius_from_km(11.1)),
-        ("Deimos", 4usize, 0.000157, 1.263, 1.8, 260.0, scene_radius_from_km(6.2)),
-        ("Io", 5usize, 0.00282, 1.769, 0.05, 40.0, scene_radius_from_km(1_821.6)),
-        ("Europa", 5usize, 0.00449, 3.551, 0.47, 90.0, scene_radius_from_km(1_560.8)),
-        ("Ganymede", 5usize, 0.00716, 7.155, 0.20, 160.0, scene_radius_from_km(2_634.1)),
-        ("Callisto", 5usize, 0.01258, 16.689, 0.28, 240.0, scene_radius_from_km(2_410.3)),
-        ("Titan", 6usize, 0.00817, 15.945, 0.35, 70.0, scene_radius_from_km(2_574.7)),
-        ("Triton", 8usize, 0.00237, 5.877, 23.0, 180.0, scene_radius_from_km(1_353.4)),
-    ];
-    for (name, parent_index, semi_major_axis_au, orbital_period_days, inclination_deg, mean_longitude_deg, radius_scene) in moons {
-        bodies.push(CelestialBody {
-            name,
-            texture_asset: "mercury",
-            orbit: BodyOrbit::Planetocentric { parent_index, semi_major_axis_au, orbital_period_days, inclination_deg, mean_longitude_deg },
-            radius_scene,
-            rotation_multiplier: 0.7,
-            surface_color: [0.55, 0.52, 0.48, 1.0],
-            atmosphere_color: [0.42, 0.38, 0.32, 1.0],
-            atmosphere_strength: if name == "Titan" { 0.26 } else { 0.0 },
-            specular_strength: 0.01,
-            surface_texture_weight: 0.45,
-        });
-    }
-
-    let asteroids = [
-        ("Ceres", 2.7675, 0.0758, 10.59, 80.30, 73.60, 95.99, 1_680.0, 469.7),
-        ("Vesta", 2.3618, 0.0887, 7.14, 103.85, 150.73, 151.20, 1_325.8, 262.7),
-        ("Pallas", 2.7730, 0.2310, 34.84, 173.10, 310.17, 33.22, 1_686.0, 256.0),
-        ("Hygiea", 3.1415, 0.1125, 3.83, 283.20, 312.32, 60.90, 2_034.0, 217.0),
-        ("Interamnia", 3.0620, 0.1550, 17.31, 280.36, 95.76, 280.0, 1_956.0, 166.0),
-        ("Davida", 3.1640, 0.1860, 15.94, 107.60, 337.60, 310.0, 2_055.0, 149.0),
-        ("Psyche", 2.9230, 0.1340, 3.10, 150.04, 229.33, 35.0, 1_827.0, 113.0),
-        ("Eros", 1.4580, 0.2230, 10.83, 304.30, 178.80, 178.0, 643.0, 8.4),
-    ];
-    for (name, semi_major_axis_au, eccentricity, inclination_deg, longitude_ascending_node_deg, longitude_perihelion_deg, mean_longitude_deg, orbital_period_days, radius_km) in asteroids {
-        bodies.push(CelestialBody {
-            name,
-            texture_asset: "mercury",
-            orbit: BodyOrbit::BeltObject {
-                semi_major_axis_au,
-                eccentricity,
-                inclination_deg,
-                longitude_ascending_node_deg,
-                longitude_perihelion_deg,
-                mean_longitude_deg,
-                orbital_period_days,
-            },
-            radius_scene: scene_radius_from_km(radius_km),
-            rotation_multiplier: 1.8,
-            surface_color: [0.34, 0.31, 0.27, 1.0],
-            atmosphere_color: [0.0, 0.0, 0.0, 1.0],
-            atmosphere_strength: 0.0,
-            specular_strength: 0.0,
-            surface_texture_weight: 0.18,
-        });
-    }
-
-    bodies
+/// Heliocentric ecliptic positions converted to scene axes, where the scene Y axis is
+/// the ecliptic north pole.
+fn compute_scene_positions(bodies: &[SolarSystemBody], julian_day: f64) -> Vec<Vec3> {
+    compute_catalogue_positions_au(bodies, julian_day)
+        .into_iter()
+        .map(|position| {
+            Vec3::new(
+                (position[0] * AU_TO_SCENE_UNITS) as f32,
+                (position[2] * AU_TO_SCENE_UNITS) as f32,
+                (position[1] * AU_TO_SCENE_UNITS) as f32,
+            )
+        })
+        .collect()
 }
 
 fn create_scene(config_text: &str, star_shell_radius: f32) -> Result<SceneDefinition, String> {
@@ -4378,8 +4563,8 @@ fn create_scene(config_text: &str, star_shell_radius: f32) -> Result<SceneDefini
 }
 
 fn ra_dec_to_cartesian_f64(target: &CampaignTargetConfig, radius: f64) -> [f64; 3] {
-    let ra = target.ra_deg.to_radians() as f64;
-    let dec = target.dec_deg.to_radians() as f64;
+    let ra = target.ra_deg.to_radians();
+    let dec = target.dec_deg.to_radians();
 
     let x = radius * dec.cos() * ra.cos();
     let y = radius * dec.sin();
@@ -4399,27 +4584,6 @@ fn priority_to_luminance(priority: u8) -> f32 {
     0.30 + 0.70 * normalized
 }
 
-fn atmospheric_palette(atmosphere_strength: f32, light_tilt: f32) -> ([f32; 4], [f32; 4]) {
-    let glow = atmosphere_strength.clamp(0.0, 1.5);
-    let day_mix = (light_tilt * 0.5 + 0.5).clamp(0.0, 1.0);
-    let dawn_glow = (1.0 - (light_tilt - 0.65).abs() / 0.65).clamp(0.0, 1.0);
-
-    let planet = [
-        0.025 + 0.070 * day_mix + 0.040 * dawn_glow,
-        0.060 + 0.155 * day_mix + 0.055 * dawn_glow,
-        0.120 + 0.260 * day_mix + 0.075 * dawn_glow,
-        1.0,
-    ];
-    let atmosphere = [
-        0.035 + 0.170 * glow + 0.090 * dawn_glow,
-        0.080 + 0.240 * glow + 0.110 * dawn_glow,
-        0.180 + 0.320 * glow + 0.150 * dawn_glow,
-        1.0,
-    ];
-
-    (planet, atmosphere)
-}
-
 fn sky_background_color(elevation: f32, time_of_day: f32) -> [f32; 3] {
     let norm = elevation.clamp(-1.0, 1.0);
     let zenith_factor = (norm + 1.0) * 0.5;
@@ -4433,39 +4597,6 @@ fn sky_background_color(elevation: f32, time_of_day: f32) -> [f32; 3] {
         deep_space * 0.62 + airglow * 0.32 + zodiacal * 0.18,
         deep_space * 0.92 + airglow * 0.42 + zodiacal * 0.15,
         deep_space * 1.85 + airglow * 0.58 + zodiacal * 0.12,
-    ]
-}
-
-fn tone_map_color(value: [f32; 3]) -> [f32; 3] {
-    let exposure = 1.42;
-    let mapped = [
-        value[0] * exposure,
-        value[1] * exposure,
-        value[2] * exposure,
-    ];
-    let gamma = [
-        mapped[0].powf(0.82),
-        mapped[1].powf(0.82),
-        mapped[2].powf(0.82),
-    ];
-
-    [
-        gamma[0].clamp(0.0, 1.0),
-        gamma[1].clamp(0.0, 1.0),
-        gamma[2].clamp(0.0, 1.0),
-    ]
-}
-
-fn solar_halo_color(elevation: f32, daylight: f32) -> [f32; 3] {
-    let norm = elevation.clamp(-1.0, 1.0);
-    let glow = daylight.clamp(0.0, 1.0);
-    let horizon = (1.0 - (norm + 1.0) * 0.5).clamp(0.0, 1.0);
-    let solar = 0.2 + 0.8 * glow * (1.0 - horizon * 0.65);
-
-    [
-        0.08 + 0.42 * solar,
-        0.14 + 0.46 * solar,
-        0.30 + 0.70 * solar,
     ]
 }
 
@@ -4545,6 +4676,40 @@ fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
     }
 
     stars
+}
+
+/// Flat annulus lying in the body equatorial plane. Vertices carry a unit direction and
+/// the radial fraction in `uv.x`, so one mesh serves every ring system.
+fn generate_ring_annulus(angular_segments: u32, radial_segments: u32) -> (Vec<MeshVertex>, Vec<u32>) {
+    let angular_segments = angular_segments.max(8);
+    let radial_segments = radial_segments.max(1);
+    let mut vertices = Vec::with_capacity(((angular_segments + 1) * (radial_segments + 1)) as usize);
+    let mut indices = Vec::with_capacity((angular_segments * radial_segments * 6) as usize);
+
+    for radial in 0..=radial_segments {
+        let radial_fraction = radial as f32 / radial_segments as f32;
+        for angular in 0..=angular_segments {
+            let angle_fraction = angular as f32 / angular_segments as f32;
+            let angle = angle_fraction * 2.0 * PI;
+            vertices.push(MeshVertex {
+                position: [angle.cos(), 0.0, angle.sin()],
+                normal: [0.0, 1.0, 0.0],
+                uv: [radial_fraction, angle_fraction],
+            });
+        }
+    }
+
+    let ring_stride = angular_segments + 1;
+    for radial in 0..radial_segments {
+        for angular in 0..angular_segments {
+            let base = radial * ring_stride + angular;
+            let next_ring = base + ring_stride;
+            indices.extend_from_slice(&[base, next_ring, base + 1]);
+            indices.extend_from_slice(&[base + 1, next_ring, next_ring + 1]);
+        }
+    }
+
+    (vertices, indices)
 }
 
 fn generate_uv_sphere(
@@ -4757,15 +4922,19 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        atmospheric_palette, build_frame_color_image, build_solar_system_bodies,
-        compute_solar_system_positions, equatorial_to_scene_direction, format_airmass,
-        format_declination, format_hours_hms, format_right_ascension, generate_background_stars,
-        generate_sky_dome, generate_uv_sphere, parse_cli_args, parse_ppm_rgb, percentile_value,
-        priority_to_luminance, ra_dec_to_cartesian, ra_dec_to_cartesian_f64, sky_background_color,
-        solar_halo_color, stacking_method_name, tone_map_color, workspace_capabilities, Workspace,
-        J2000_JULIAN_DAY, KM_PER_AU,
+        body_class_id, body_specular_strength, build_frame_color_image, compute_scene_positions,
+        equatorial_to_scene_direction, expand_rgb_to_rgba, format_airmass, format_declination,
+        format_hours_hms, format_right_ascension, format_rotation_period,
+        generate_background_stars, generate_ring_annulus, generate_sky_dome, generate_uv_sphere,
+        parse_cli_args, percentile_value, priority_to_luminance, ra_dec_to_cartesian,
+        ra_dec_to_cartesian_f64, reverse_z_perspective_rh, sky_background_color,
+        stacking_method_name, workspace_capabilities, Workspace, J2000_JULIAN_DAY,
     };
-    use observatory_core::{ecliptic_vector_to_equatorial, CampaignTargetConfig, StackingMethod};
+    use glam::DVec4;
+    use observatory_core::{
+        ecliptic_vector_to_equatorial, solar_system_catalogue, BodyClass, CampaignTargetConfig,
+        PpmImage, StackingMethod,
+    };
 
     #[test]
     fn parse_cli_args_reads_graphics_options() {
@@ -4777,13 +4946,11 @@ mod tests {
             "1080".to_string(),
             "--fov".to_string(),
             "62".to_string(),
-            "--planet-radius".to_string(),
-            "1.5".to_string(),
             "--star-radius".to_string(),
             "60".to_string(),
-            "--rotation-speed".to_string(),
-            "4.5".to_string(),
-            "--atmosphere".to_string(),
+            "--time-scale".to_string(),
+            "3600".to_string(),
+            "--display-exposure".to_string(),
             "0.8".to_string(),
         ];
 
@@ -4792,10 +4959,9 @@ mod tests {
         assert_eq!(parsed.width, 1920);
         assert_eq!(parsed.height, 1080);
         assert!((parsed.fov_deg - 62.0).abs() < 1e-6);
-        assert!((parsed.planet_radius - 1.5).abs() < 1e-6);
+        assert!((parsed.time_scale - 3600.0).abs() < 1e-9);
         assert!((parsed.star_shell_radius - 60.0).abs() < 1e-6);
-        assert!((parsed.planet_rotation_deg_per_s - 4.5).abs() < 1e-6);
-        assert!((parsed.atmosphere_strength - 0.8).abs() < 1e-6);
+        assert!((parsed.exposure - 0.8).abs() < 1e-6);
     }
 
     #[test]
@@ -4847,15 +5013,6 @@ mod tests {
     }
 
     #[test]
-    fn atmospheric_palette_remains_in_range_and_alpha_is_opaque() {
-        let (planet, atmosphere) = atmospheric_palette(0.75, 1.2);
-        assert!(planet[0].is_finite() && planet[1].is_finite() && planet[2].is_finite());
-        assert!(atmosphere[0].is_finite() && atmosphere[1].is_finite() && atmosphere[2].is_finite());
-        assert!((planet[3] - 1.0).abs() < 1e-6);
-        assert!((atmosphere[3] - 1.0).abs() < 1e-6);
-    }
-
-    #[test]
     fn sky_background_color_makes_zenith_brighter_than_horizon() {
         let horizon = sky_background_color(-0.9, 8.0);
         let zenith = sky_background_color(0.9, 8.0);
@@ -4888,42 +5045,68 @@ mod tests {
     }
 
     #[test]
-    fn parse_ppm_rgb_reads_binary_lod_image() {
-        let ppm = b"P6\n# generated test texture\n2 1\n255\n\x0a\x20\x30\x40\x50\x60";
-        let image = parse_ppm_rgb(ppm).expect("PPM should parse");
-        assert_eq!(image.width, 2);
-        assert_eq!(image.height, 1);
-        assert_eq!(image.rgb, vec![0x0a, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    fn surface_lod_images_expand_to_opaque_rgba() {
+        let lod = PpmImage {
+            width: 2,
+            height: 1,
+            rgb: vec![0x0a, 0x20, 0x30, 0x40, 0x50, 0x60],
+        };
+        let rgba = expand_rgb_to_rgba(&lod);
+        assert_eq!(
+            rgba,
+            vec![0x0a, 0x20, 0x30, 0xff, 0x40, 0x50, 0x60, 0xff]
+        );
     }
 
     #[test]
-    fn solar_system_catalog_includes_planets_moons_and_asteroids() {
-        let bodies = build_solar_system_bodies();
-        assert!(bodies.iter().any(|body| body.name == "Earth"));
-        assert!(bodies.iter().any(|body| body.name == "Moon"));
-        assert!(bodies.iter().any(|body| body.name == "Titan"));
-        assert!(bodies.iter().any(|body| body.name == "Ceres"));
-        assert!(bodies.iter().any(|body| body.name == "Vesta"));
-        let earth = bodies.iter().find(|body| body.name == "Earth").expect("Earth exists");
-        assert!(((earth.radius_scene as f64 * KM_PER_AU) - 6_371.0).abs() < 0.5);
-        let positions = compute_solar_system_positions(&bodies, J2000_JULIAN_DAY);
-        assert_eq!(positions.len(), bodies.len());
+    fn scene_positions_place_bodies_on_the_ecliptic_scene_axes() {
+        let catalogue = solar_system_catalogue();
+        let positions = compute_scene_positions(&catalogue, J2000_JULIAN_DAY);
+        assert_eq!(positions.len(), catalogue.len());
         assert!(positions.iter().all(|position| position.is_finite()));
+
+        let sun_index = catalogue.iter().position(|b| b.name == "Sun").unwrap();
+        assert_eq!(positions[sun_index], glam::Vec3::ZERO);
+
+        // Earth orbits close to the ecliptic plane, so its scene Y component is tiny.
+        let earth_index = catalogue.iter().position(|b| b.name == "Earth").unwrap();
+        let earth = positions[earth_index];
+        assert!(earth.y.abs() < 1.0e-3, "earth y = {}", earth.y);
+        assert!((earth.length() - 0.983).abs() < 0.02);
     }
 
     #[test]
-    fn tone_map_color_keeps_values_in_unit_range() {
-        let tone = tone_map_color([3.0, 0.5, 2.0]);
-        assert!(tone.iter().all(|value| (*value >= 0.0) && (*value <= 1.0)));
+    fn ring_annulus_has_consistent_topology_and_upward_normals() {
+        let (vertices, indices) = generate_ring_annulus(16, 4);
+        assert_eq!(vertices.len(), (16 + 1) * (4 + 1));
+        assert_eq!(indices.len(), 16 * 4 * 6);
+        assert!(indices.iter().all(|index| (*index as usize) < vertices.len()));
+        for vertex in &vertices {
+            assert_eq!(vertex.normal, [0.0, 1.0, 0.0]);
+            assert!(vertex.position[1].abs() < 1.0e-9);
+            let radius = vertex.position[0].hypot(vertex.position[2]);
+            assert!((radius - 1.0).abs() < 1.0e-6);
+            assert!((0.0..=1.0).contains(&vertex.uv[0]));
+        }
     }
 
     #[test]
-    fn solar_halo_color_is_more_intense_in_daylight() {
-        let night = solar_halo_color(-0.8, 0.1);
-        let day = solar_halo_color(0.8, 0.9);
-        assert!(day[0] > night[0]);
-        assert!(day[1] > night[1]);
-        assert!(day[2] > night[2]);
+    fn only_the_star_is_emissive_and_giants_are_tagged_apart() {
+        assert_eq!(body_class_id(BodyClass::Star), 0.0);
+        assert_eq!(body_class_id(BodyClass::TerrestrialPlanet), 1.0);
+        assert_eq!(body_class_id(BodyClass::GasGiant), 2.0);
+        assert_eq!(body_class_id(BodyClass::IceGiant), 3.0);
+        assert_eq!(body_specular_strength(BodyClass::GasGiant), 0.0);
+        assert!(body_specular_strength(BodyClass::TerrestrialPlanet) > 0.0);
+    }
+
+    #[test]
+    fn rotation_periods_are_formatted_with_their_sense() {
+        let earth = format_rotation_period(0.99726968);
+        assert!(earth.starts_with("23 h 56 min"), "{earth}");
+        let venus = format_rotation_period(-243.025);
+        assert!(venus.contains("retrograde"), "{venus}");
+        assert_eq!(format_rotation_period(f64::INFINITY), "non definie");
     }
 
     #[test]
@@ -5009,5 +5192,30 @@ mod tests {
     fn frame_color_image_rejects_inconsistent_geometry() {
         let image = build_frame_color_image(&[1.0, 2.0, 3.0], 4, 4, 1.0, 99.0);
         assert_eq!(image.size, [1, 1]);
+    }
+
+    #[test]
+    fn reverse_z_projection_maps_near_to_one_and_far_to_zero() {
+        let near = 1.0e-6;
+        let far = 400.0;
+        let projection = reverse_z_perspective_rh(56.0_f64.to_radians(), 16.0 / 9.0, near, far);
+
+        let at_near = projection * DVec4::new(0.0, 0.0, -near, 1.0);
+        let at_far = projection * DVec4::new(0.0, 0.0, -far, 1.0);
+        assert!((at_near.z / at_near.w - 1.0).abs() < 1e-9);
+        assert!((at_far.z / at_far.w).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reverse_z_depth_decreases_with_distance() {
+        let projection = reverse_z_perspective_rh(56.0_f64.to_radians(), 1.6, 1.0e-6, 400.0);
+        let mut previous = f64::INFINITY;
+        for distance in [1.0e-5, 1.0e-3, 0.1, 1.0, 30.0, 399.0] {
+            let clip = projection * DVec4::new(0.0, 0.0, -distance, 1.0);
+            let depth = clip.z / clip.w;
+            assert!(depth > 0.0 && depth < 1.0);
+            assert!(depth < previous);
+            previous = depth;
+        }
     }
 }

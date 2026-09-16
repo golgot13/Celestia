@@ -116,9 +116,9 @@ impl SessionLedger {
             json.push_str(&entry.checksum.to_string());
             json.push_str("\n    }");
             if index + 1 < self.entries.len() {
-                json.push_str(",");
+                json.push(',');
             }
-            json.push_str("\n");
+            json.push('\n');
         }
 
         json.push_str("  ]\n");

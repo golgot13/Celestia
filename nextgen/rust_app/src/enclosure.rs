@@ -264,11 +264,11 @@ pub fn enclosure_report_to_json(report: &EnclosureSafetyReport) -> String {
     for (i, r) in report.safety_reasons.iter().enumerate() {
         json.push_str("    \"");
         json.push_str(&r.replace('"', "\\\""));
-        json.push_str("\"");
+        json.push('"');
         if i + 1 < report.safety_reasons.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");

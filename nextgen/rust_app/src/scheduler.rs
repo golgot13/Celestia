@@ -217,9 +217,9 @@ pub fn schedule_plan_to_json(plan: &SchedulePlan) -> String {
         json.push_str(&format!("{:.1}", obs.estimated_duration_s));
         json.push_str("\n    }");
         if index + 1 < plan.queue.len() {
-            json.push_str(",");
+            json.push(',');
         }
-        json.push_str("\n");
+        json.push('\n');
     }
 
     json.push_str("  ]\n");
