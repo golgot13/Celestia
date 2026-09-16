@@ -224,7 +224,7 @@ struct FrameUniform {
     _padding: f32,
 }
 
-#[repr(C)]
+#[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct ViewUniform {
     view_proj: [[f32; 4]; 4],
