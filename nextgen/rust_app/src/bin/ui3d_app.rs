@@ -4757,12 +4757,15 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        atmospheric_palette, build_solar_system_bodies, compute_solar_system_positions,
-        generate_background_stars, generate_sky_dome, generate_uv_sphere, parse_cli_args,
-        parse_ppm_rgb, priority_to_luminance, ra_dec_to_cartesian, ra_dec_to_cartesian_f64,
-        sky_background_color, solar_halo_color, tone_map_color, J2000_JULIAN_DAY, KM_PER_AU,
+        atmospheric_palette, build_frame_color_image, build_solar_system_bodies,
+        compute_solar_system_positions, equatorial_to_scene_direction, format_airmass,
+        format_declination, format_hours_hms, format_right_ascension, generate_background_stars,
+        generate_sky_dome, generate_uv_sphere, parse_cli_args, parse_ppm_rgb, percentile_value,
+        priority_to_luminance, ra_dec_to_cartesian, ra_dec_to_cartesian_f64, sky_background_color,
+        solar_halo_color, stacking_method_name, tone_map_color, workspace_capabilities, Workspace,
+        J2000_JULIAN_DAY, KM_PER_AU,
     };
-    use observatory_core::CampaignTargetConfig;
+    use observatory_core::{ecliptic_vector_to_equatorial, CampaignTargetConfig, StackingMethod};
 
     #[test]
     fn parse_cli_args_reads_graphics_options() {
@@ -4921,5 +4924,90 @@ mod tests {
         assert!(day[0] > night[0]);
         assert!(day[1] > night[1]);
         assert!(day[2] > night[2]);
+    }
+
+    #[test]
+    fn every_workspace_exposes_navigation_metadata() {
+        for workspace in Workspace::ALL {
+            assert!(!workspace.title().is_empty());
+            assert!(!workspace.icon().is_empty());
+            assert!(!workspace.summary().is_empty());
+        }
+        assert!(workspace_capabilities(Workspace::Home).is_empty());
+        for workspace in [
+            Workspace::SkyOperations,
+            Workspace::Science,
+            Workspace::Simulator,
+        ] {
+            assert!(!workspace_capabilities(workspace).is_empty());
+        }
+    }
+
+    #[test]
+    fn formats_equatorial_coordinates_in_sexagesimal() {
+        assert_eq!(format_right_ascension(0.0), "00h00m00.00s");
+        assert_eq!(format_right_ascension(180.0), "12h00m00.00s");
+        assert_eq!(format_right_ascension(-15.0), "23h00m00.00s");
+        assert_eq!(format_declination(0.0), "+00d00m00.0s");
+        assert_eq!(format_declination(-41.5), "-41d30m00.0s");
+        assert_eq!(format_hours_hms(1.5), "01h30m00.00s");
+    }
+
+    #[test]
+    fn airmass_formatting_marks_objects_below_the_horizon() {
+        assert_eq!(format_airmass(1.25), "1.250");
+        assert_eq!(format_airmass(f64::INFINITY), "hors horizon");
+    }
+
+    #[test]
+    fn stacking_method_names_are_distinct() {
+        let names = [
+            stacking_method_name(StackingMethod::Average),
+            stacking_method_name(StackingMethod::Median),
+            stacking_method_name(StackingMethod::SigmaClipping),
+        ];
+        assert_ne!(names[0], names[1]);
+        assert_ne!(names[1], names[2]);
+        assert_ne!(names[0], names[2]);
+    }
+
+    #[test]
+    fn scene_direction_round_trips_through_equatorial_conversion() {
+        for (ra_deg, dec_deg) in [(0.0, 0.0), (83.633, 22.014), (201.3, -43.1), (359.9, 67.5)] {
+            let direction = equatorial_to_scene_direction(ra_deg, dec_deg);
+            assert!((direction.length() - 1.0).abs() < 1e-12);
+
+            let (recovered_ra, recovered_dec, range) =
+                ecliptic_vector_to_equatorial(direction.x, direction.z, direction.y);
+            assert!((range - 1.0).abs() < 1e-12);
+            assert!((recovered_dec - dec_deg).abs() < 1e-9);
+            let delta_ra = (recovered_ra - ra_deg).rem_euclid(360.0);
+            assert!(delta_ra < 1e-9 || (360.0 - delta_ra) < 1e-9);
+        }
+    }
+
+    #[test]
+    fn percentile_value_selects_ordered_samples() {
+        let sorted = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        assert_eq!(percentile_value(&sorted, 0.0), 0.0);
+        assert_eq!(percentile_value(&sorted, 100.0), 4.0);
+        assert_eq!(percentile_value(&sorted, 50.0), 2.0);
+        assert_eq!(percentile_value(&[], 50.0), 0.0);
+    }
+
+    #[test]
+    fn frame_color_image_applies_percentile_stretch() {
+        let pixels: Vec<f64> = (0..16).map(|value| value as f64).collect();
+        let image = build_frame_color_image(&pixels, 4, 4, 0.0, 100.0);
+        assert_eq!(image.size, [4, 4]);
+        assert_eq!(image.pixels[0].r(), 0);
+        assert_eq!(image.pixels[15].r(), 255);
+        assert!(image.pixels[8].r() > image.pixels[4].r());
+    }
+
+    #[test]
+    fn frame_color_image_rejects_inconsistent_geometry() {
+        let image = build_frame_color_image(&[1.0, 2.0, 3.0], 4, 4, 1.0, 99.0);
+        assert_eq!(image.size, [1, 1]);
     }
 }
