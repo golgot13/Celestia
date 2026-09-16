@@ -229,7 +229,7 @@ struct FrameUniform {
 struct ViewUniform {
     view_proj: [[f32; 4]; 4],
     time_s: f32,
-    _padding: [f32; 3],
+    _padding: [f32; 4],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -552,7 +552,7 @@ impl RenderState {
         let view_uniform = ViewUniform {
             view_proj: view_proj.to_cols_array_2d(),
             time_s: 0.0,
-            _padding: [0.0; 3],
+            _padding: [0.0; 4],
         };
 
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
