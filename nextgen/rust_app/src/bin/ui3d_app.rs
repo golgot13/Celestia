@@ -1,7 +1,8 @@
 use std::f32::consts::{FRAC_PI_2, PI};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytemuck::{Pod, Zeroable};
 use egui::{Color32, RichText};
@@ -15,6 +16,9 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowBuilder};
 
 const PLANET_TEXTURE_LAYER_COUNT: u32 = 3;
+const J2000_JULIAN_DAY: f64 = 2451545.0;
+const UNIX_EPOCH_JULIAN_DAY: f64 = 2440587.5;
+const AU_TO_SCENE_UNITS: f64 = 0.72;
 
 const PLANET_SHADER_WGSL: &str = r#"
 struct FrameUniform {
@@ -471,6 +475,53 @@ struct SceneDefinition {
     targets: Vec<SceneTarget>,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct OrbitalElements {
+    semi_major_axis_au: f64,
+    eccentricity: f64,
+    inclination_deg: f64,
+    longitude_ascending_node_deg: f64,
+    longitude_perihelion_deg: f64,
+    mean_longitude_deg: f64,
+    orbital_period_days: f64,
+}
+
+#[derive(Clone, Debug)]
+enum BodyOrbit {
+    FixedSun,
+    Heliocentric(OrbitalElements),
+    Planetocentric {
+        parent_index: usize,
+        semi_major_axis_au: f64,
+        orbital_period_days: f64,
+        inclination_deg: f64,
+        mean_longitude_deg: f64,
+    },
+    BeltObject {
+        semi_major_axis_au: f64,
+        eccentricity: f64,
+        inclination_deg: f64,
+        longitude_ascending_node_deg: f64,
+        longitude_perihelion_deg: f64,
+        mean_longitude_deg: f64,
+        orbital_period_days: f64,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct CelestialBody {
+    name: &'static str,
+    texture_asset: &'static str,
+    orbit: BodyOrbit,
+    radius_scene: f32,
+    rotation_multiplier: f32,
+    surface_color: [f32; 4],
+    atmosphere_color: [f32; 4],
+    atmosphere_strength: f32,
+    specular_strength: f32,
+    surface_texture_weight: f32,
+}
+
 #[derive(Clone, Debug)]
 struct RuntimeSummary {
     app_name: String,
@@ -519,7 +570,7 @@ impl Camera {
     fn reset(&mut self) {
         self.yaw = 0.25 * PI as f64;
         self.pitch = 0.18 * PI as f64;
-        self.distance = 5.5;
+        self.distance = 34.0;
     }
 }
 
@@ -595,8 +646,10 @@ struct RenderState {
 
     frame_uniform: FrameUniform,
     frame_buffer: wgpu::Buffer,
-    frame_bind_group: wgpu::BindGroup,
-    _planet_layers: PlanetLayerTextures,
+    _frame_bind_group: wgpu::BindGroup,
+    planet_bind_groups: Vec<wgpu::BindGroup>,
+    body_bind_group_indices: Vec<usize>,
+    _planet_layers: Vec<PlanetLayerTextures>,
 
     view_uniform: ViewUniform,
     view_buffer: wgpu::Buffer,
@@ -628,6 +681,8 @@ struct RenderState {
     planet_rotation_rad: f32,
     light_orbit_rad: f32,
     elapsed_time_s: f32,
+    solar_system_bodies: Vec<CelestialBody>,
+    solar_system_positions: Vec<Vec3>,
 
     runtime: RuntimeSummary,
     campaign_name: String,
@@ -699,7 +754,7 @@ impl RenderState {
         let camera = Camera {
             yaw: 0.25 * PI as f64,
             pitch: 0.18 * PI as f64,
-            distance: 5.5,
+            distance: 34.0,
             fov_deg: options.fov_deg,
             near_plane: options.near_plane,
             far_plane: options.far_plane,
@@ -752,7 +807,7 @@ impl RenderState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let planet_layers = load_planet_layer_textures(&device, &queue)?;
+        let planet_layers = load_planet_layer_textures(&device, &queue, "mars")?;
 
         let view_uniform = ViewUniform::new(view_proj, 0.0);
 
@@ -812,6 +867,47 @@ impl RenderState {
                 },
             ],
         });
+
+        let solar_system_bodies = build_solar_system_bodies();
+        let mut planet_bind_groups = Vec::with_capacity(solar_system_bodies.len());
+        let mut planet_layer_resources = Vec::with_capacity(solar_system_bodies.len() + 1);
+        planet_layer_resources.push(planet_layers);
+
+        let mut asset_bind_group_indices = HashMap::<&'static str, usize>::new();
+        let mut body_bind_group_indices = Vec::with_capacity(solar_system_bodies.len());
+
+        for body in &solar_system_bodies {
+            let bind_group_index = if let Some(index) = asset_bind_group_indices.get(body.texture_asset) {
+                *index
+            } else {
+                let layer_index = planet_layer_resources.len();
+                planet_layer_resources.push(load_planet_layer_textures(&device, &queue, body.texture_asset)?);
+                let layers = &planet_layer_resources[layer_index];
+                let index = planet_bind_groups.len();
+                planet_bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("solar_system_body_bind_group"),
+                    layout: &frame_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: frame_buffer.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&layers.layer_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(&layers.layer_sampler),
+                        },
+                    ],
+                }));
+                asset_bind_group_indices.insert(body.texture_asset, index);
+                index
+            };
+            body_bind_group_indices.push(bind_group_index);
+        }
+        let solar_system_positions = vec![Vec3::ZERO; solar_system_bodies.len()];
 
         let view_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("view_bind_group_layout"),
@@ -1202,8 +1298,10 @@ impl RenderState {
             guide_pipeline,
             frame_uniform,
             frame_buffer,
-            frame_bind_group,
-            _planet_layers: planet_layers,
+            _frame_bind_group: frame_bind_group,
+            planet_bind_groups,
+            body_bind_group_indices,
+            _planet_layers: planet_layer_resources,
             view_uniform,
             view_buffer,
             view_bind_group,
@@ -1228,6 +1326,8 @@ impl RenderState {
             planet_rotation_rad: 0.0,
             light_orbit_rad: 0.0,
             elapsed_time_s: 0.0,
+            solar_system_bodies,
+            solar_system_positions,
             runtime,
             campaign_name: scene.campaign_name,
             title_last_update: Instant::now(),
@@ -1354,7 +1454,7 @@ impl RenderState {
             .camera
             .pitch
             .clamp(-(FRAC_PI_2 as f64) + 0.02, (FRAC_PI_2 as f64) - 0.02);
-        self.camera.distance = self.camera.distance.clamp(1.8, 80.0);
+        self.camera.distance = self.camera.distance.clamp(1.8, 120.0);
 
         if !self.paused {
             self.planet_rotation_rad += self.planet_rotation_deg_per_s.to_radians() * dt_s as f32;
@@ -1368,17 +1468,7 @@ impl RenderState {
         self.queue
             .write_buffer(&self.view_buffer, 0, &self.view_uniform.bytes);
 
-        let planet_model = Mat4::from_rotation_y(self.planet_rotation_rad);
-        let light_dir = Vec3::new(self.light_orbit_rad.cos(), 0.30, self.light_orbit_rad.sin()).normalize();
-        let (planet_color, atmosphere_color) = atmospheric_palette(
-            self.atmosphere_strength,
-            0.7 + 0.3 * self.light_orbit_rad.cos().abs(),
-        );
-        let solar_glow = solar_halo_color(0.8 + 0.2 * self.light_orbit_rad.cos(), 0.7 + 0.3 * self.light_orbit_rad.cos().abs());
-
         self.frame_uniform.view_proj = view_proj.to_cols_array_2d();
-        self.frame_uniform.model = planet_model.to_cols_array_2d();
-        self.frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
         let eye = self.camera.eye();
         self.frame_uniform.camera_pos = [
             eye.x as f32,
@@ -1386,26 +1476,10 @@ impl RenderState {
             eye.z as f32,
             0.0,
         ];
-        self.frame_uniform.planet_color = [
-            (planet_color[0] * 0.88 + solar_glow[0] * 0.12).clamp(0.0, 1.0),
-            (planet_color[1] * 0.88 + solar_glow[1] * 0.12).clamp(0.0, 1.0),
-            (planet_color[2] * 0.88 + solar_glow[2] * 0.12).clamp(0.0, 1.0),
-            1.0,
-        ];
-        self.frame_uniform.atmosphere_color = [
-            (atmosphere_color[0] * 0.78 + solar_glow[0] * 0.22).clamp(0.0, 1.0),
-            (atmosphere_color[1] * 0.78 + solar_glow[1] * 0.22).clamp(0.0, 1.0),
-            (atmosphere_color[2] * 0.78 + solar_glow[2] * 0.22).clamp(0.0, 1.0),
-            1.0,
-        ];
-        self.frame_uniform.atmosphere_strength = self.atmosphere_strength;
         self.frame_uniform.body_time_s = self.elapsed_time_s;
-        self.frame_uniform.interior_motion = 0.35;
-        self.frame_uniform.atmosphere_motion = 1.0;
-        self.frame_uniform.surface_texture_weight = 0.92;
 
-        self.queue
-            .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&self.frame_uniform));
+        let julian_day = current_julian_day();
+        self.solar_system_positions = compute_solar_system_positions(&self.solar_system_bodies, julian_day);
 
         if self.title_last_update.elapsed() >= Duration::from_millis(220) {
             self.window.set_title(&build_title(self));
@@ -1466,6 +1540,7 @@ impl RenderState {
                         ui.label("Aucune cible dans la configuration");
                     } else {
                         egui::ScrollArea::vertical()
+                            .id_source("campaign_targets_scroll")
                             .max_height(220.0)
                             .show(ui, |ui| {
                                 for (index, name) in self.target_names.iter().enumerate() {
@@ -1473,6 +1548,21 @@ impl RenderState {
                                 }
                             });
                     }
+
+                    ui.separator();
+                    ui.heading("Systeme solaire");
+                    ui.label(format!("Corps rendus: {}", self.solar_system_bodies.len()));
+                    egui::ScrollArea::vertical()
+                        .id_source("solar_system_bodies_scroll")
+                        .max_height(120.0)
+                        .show(ui, |ui| {
+                            for body in self.solar_system_bodies.iter().take(24) {
+                                ui.label(body.name);
+                            }
+                            if self.solar_system_bodies.len() > 24 {
+                                ui.label(format!("+ {} asteroides", self.solar_system_bodies.len() - 24));
+                            }
+                        });
 
                     ui.separator();
                     ui.label("Controles souris/clavier:");
@@ -1506,6 +1596,28 @@ impl RenderState {
             textures_delta,
             pixels_per_point,
         }
+    }
+
+    fn body_frame_uniform(&self, body: &CelestialBody, position: Vec3) -> FrameUniform {
+        let rotation = Mat4::from_rotation_y(self.planet_rotation_rad * body.rotation_multiplier);
+        let model = Mat4::from_translation(position) * rotation * Mat4::from_scale(Vec3::splat(body.radius_scene));
+        let light_dir = if position.length_squared() > f32::EPSILON {
+            (-position).normalize()
+        } else {
+            Vec3::new(0.7, 0.35, 0.61).normalize()
+        };
+
+        let mut frame_uniform = self.frame_uniform;
+        frame_uniform.model = model.to_cols_array_2d();
+        frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
+        frame_uniform.planet_color = body.surface_color;
+        frame_uniform.atmosphere_color = body.atmosphere_color;
+        frame_uniform.atmosphere_strength = body.atmosphere_strength * self.atmosphere_strength.max(0.05);
+        frame_uniform.specular_strength = body.specular_strength;
+        frame_uniform.interior_motion = 0.12 + body.rotation_multiplier.abs() * 0.05;
+        frame_uniform.atmosphere_motion = 0.35 + body.atmosphere_strength * 2.2;
+        frame_uniform.surface_texture_weight = body.surface_texture_weight;
+        frame_uniform
     }
 
     fn render(&mut self, ui_frame: UiFrameData) -> Result<(), wgpu::SurfaceError> {
@@ -1586,17 +1698,28 @@ impl RenderState {
                 pass.draw(0..self.guide_vertex_count, 0..1);
             }
 
-            pass.set_pipeline(&self.planet_pipeline);
-            pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
-            pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+            for body_index in 0..self.solar_system_bodies.len() {
+                let body = self.solar_system_bodies[body_index].clone();
+                let position = self.solar_system_positions[body_index];
+                let frame_uniform = self.body_frame_uniform(&body, position);
+                self.queue
+                    .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame_uniform));
 
-            pass.set_pipeline(&self.atmosphere_pipeline);
-            pass.set_bind_group(0, &self.frame_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
-            pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+                pass.set_pipeline(&self.planet_pipeline);
+                let bind_group_index = self.body_bind_group_indices[body_index];
+                pass.set_bind_group(0, &self.planet_bind_groups[bind_group_index], &[]);
+                pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
+                pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+
+                if body.atmosphere_strength > 0.001 {
+                    pass.set_pipeline(&self.atmosphere_pipeline);
+                    pass.set_bind_group(0, &self.planet_bind_groups[bind_group_index], &[]);
+                    pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+                }
+            }
         }
 
         {
@@ -1634,8 +1757,9 @@ impl RenderState {
 fn load_planet_layer_textures(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
+    asset_name: &str,
 ) -> Result<PlanetLayerTextures, String> {
-    let base_dir = Path::new("assets").join("textures").join("mars");
+    let base_dir = Path::new("assets").join("textures").join(asset_name);
     let lod_names = ["lod0.ppm", "lod1.ppm", "lod2.ppm", "lod3.ppm"];
     let lods: Vec<TextureLodImage> = lod_names
         .iter()
@@ -2112,6 +2236,194 @@ fn print_usage() {
     println!("  G                          toggle guide lines");
     println!("  R                          reset camera");
     println!("  H                          print controls to terminal");
+}
+
+fn current_julian_day() -> f64 {
+    let unix_seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0);
+    UNIX_EPOCH_JULIAN_DAY + unix_seconds / 86_400.0
+}
+
+fn solve_kepler(mean_anomaly_rad: f64, eccentricity: f64) -> f64 {
+    let mut eccentric_anomaly = mean_anomaly_rad;
+    for _ in 0..8 {
+        let delta = (eccentric_anomaly - eccentricity * eccentric_anomaly.sin() - mean_anomaly_rad)
+            / (1.0 - eccentricity * eccentric_anomaly.cos());
+        eccentric_anomaly -= delta;
+        if delta.abs() < 1e-12 {
+            break;
+        }
+    }
+    eccentric_anomaly
+}
+
+fn heliocentric_position(elements: OrbitalElements, julian_day: f64) -> Vec3 {
+    let days_since_j2000 = julian_day - J2000_JULIAN_DAY;
+    let mean_anomaly_deg = elements.mean_longitude_deg
+        - elements.longitude_perihelion_deg
+        + 360.0 * days_since_j2000 / elements.orbital_period_days;
+    let mean_anomaly_rad = mean_anomaly_deg.to_radians().rem_euclid(std::f64::consts::TAU);
+    let eccentric_anomaly = solve_kepler(mean_anomaly_rad, elements.eccentricity);
+    let xv = eccentric_anomaly.cos() - elements.eccentricity;
+    let yv = (1.0 - elements.eccentricity * elements.eccentricity).sqrt() * eccentric_anomaly.sin();
+    let true_anomaly = yv.atan2(xv);
+    let radius_au = elements.semi_major_axis_au * (1.0 - elements.eccentricity * eccentric_anomaly.cos());
+
+    let longitude_node = elements.longitude_ascending_node_deg.to_radians();
+    let inclination = elements.inclination_deg.to_radians();
+    let argument_perihelion = (elements.longitude_perihelion_deg - elements.longitude_ascending_node_deg).to_radians();
+    let argument = true_anomaly + argument_perihelion;
+
+    let x = radius_au * (longitude_node.cos() * argument.cos() - longitude_node.sin() * argument.sin() * inclination.cos());
+    let y = radius_au * (argument.sin() * inclination.sin());
+    let z = radius_au * (longitude_node.sin() * argument.cos() + longitude_node.cos() * argument.sin() * inclination.cos());
+    Vec3::new((x * AU_TO_SCENE_UNITS) as f32, (y * AU_TO_SCENE_UNITS) as f32, (z * AU_TO_SCENE_UNITS) as f32)
+}
+
+fn circular_relative_position(
+    semi_major_axis_au: f64,
+    orbital_period_days: f64,
+    inclination_deg: f64,
+    mean_longitude_deg: f64,
+    julian_day: f64,
+) -> Vec3 {
+    let days_since_j2000 = julian_day - J2000_JULIAN_DAY;
+    let phase = (mean_longitude_deg + 360.0 * days_since_j2000 / orbital_period_days).to_radians();
+    let inclination = inclination_deg.to_radians();
+    let x = semi_major_axis_au * phase.cos();
+    let y = semi_major_axis_au * phase.sin() * inclination.sin();
+    let z = semi_major_axis_au * phase.sin() * inclination.cos();
+    Vec3::new((x * AU_TO_SCENE_UNITS) as f32, (y * AU_TO_SCENE_UNITS) as f32, (z * AU_TO_SCENE_UNITS) as f32)
+}
+
+fn compute_solar_system_positions(bodies: &[CelestialBody], julian_day: f64) -> Vec<Vec3> {
+    let mut positions = Vec::with_capacity(bodies.len());
+    for body in bodies {
+        let position = match body.orbit {
+            BodyOrbit::FixedSun => Vec3::ZERO,
+            BodyOrbit::Heliocentric(elements) => heliocentric_position(elements, julian_day),
+            BodyOrbit::Planetocentric {
+                parent_index,
+                semi_major_axis_au,
+                orbital_period_days,
+                inclination_deg,
+                mean_longitude_deg,
+            } => positions[parent_index]
+                + circular_relative_position(
+                    semi_major_axis_au,
+                    orbital_period_days,
+                    inclination_deg,
+                    mean_longitude_deg,
+                    julian_day,
+                ),
+            BodyOrbit::BeltObject {
+                semi_major_axis_au,
+                eccentricity,
+                inclination_deg,
+                longitude_ascending_node_deg,
+                longitude_perihelion_deg,
+                mean_longitude_deg,
+                orbital_period_days,
+            } => heliocentric_position(
+                OrbitalElements {
+                    semi_major_axis_au,
+                    eccentricity,
+                    inclination_deg,
+                    longitude_ascending_node_deg,
+                    longitude_perihelion_deg,
+                    mean_longitude_deg,
+                    orbital_period_days,
+                },
+                julian_day,
+            ),
+        };
+        positions.push(position);
+    }
+    positions
+}
+
+fn build_solar_system_bodies() -> Vec<CelestialBody> {
+    let mut bodies = Vec::new();
+    bodies.push(CelestialBody {
+        name: "Sun",
+        texture_asset: "jupiter",
+        orbit: BodyOrbit::FixedSun,
+        radius_scene: 0.45,
+        rotation_multiplier: 0.15,
+        surface_color: [1.0, 0.78, 0.35, 1.0],
+        atmosphere_color: [1.0, 0.55, 0.18, 1.0],
+        atmosphere_strength: 0.32,
+        specular_strength: 0.0,
+        surface_texture_weight: 0.02,
+    });
+
+    let planets = [
+        ("Mercury", "mercury", 0.055, 1.8, [0.55, 0.50, 0.44, 1.0], [0.20, 0.18, 0.15, 1.0], 0.0, 0.02, 0.92, OrbitalElements { semi_major_axis_au: 0.387098, eccentricity: 0.205630, inclination_deg: 7.00487, longitude_ascending_node_deg: 48.33167, longitude_perihelion_deg: 77.45645, mean_longitude_deg: 252.25084, orbital_period_days: 87.9691 }),
+        ("Venus", "venus", 0.095, 0.9, [0.86, 0.68, 0.43, 1.0], [0.94, 0.75, 0.46, 1.0], 0.48, 0.01, 0.94, OrbitalElements { semi_major_axis_au: 0.723332, eccentricity: 0.006772, inclination_deg: 3.39471, longitude_ascending_node_deg: 76.68069, longitude_perihelion_deg: 131.53298, mean_longitude_deg: 181.97973, orbital_period_days: 224.701 }),
+        ("Earth", "earth", 0.105, 1.0, [0.48, 0.62, 0.84, 1.0], [0.42, 0.64, 1.0, 1.0], 0.38, 0.12, 0.96, OrbitalElements { semi_major_axis_au: 1.000000, eccentricity: 0.016710, inclination_deg: 0.00005, longitude_ascending_node_deg: -11.26064, longitude_perihelion_deg: 102.94719, mean_longitude_deg: 100.46435, orbital_period_days: 365.256 }),
+        ("Mars", "mars", 0.075, 0.98, [0.62, 0.25, 0.12, 1.0], [0.48, 0.22, 0.12, 1.0], 0.18, 0.045, 0.97, OrbitalElements { semi_major_axis_au: 1.523662, eccentricity: 0.093412, inclination_deg: 1.85061, longitude_ascending_node_deg: 49.57854, longitude_perihelion_deg: 336.04084, mean_longitude_deg: 355.45332, orbital_period_days: 686.980 }),
+        ("Jupiter", "jupiter", 0.28, 2.4, [0.78, 0.62, 0.46, 1.0], [0.72, 0.58, 0.44, 1.0], 0.16, 0.08, 0.96, OrbitalElements { semi_major_axis_au: 5.203363, eccentricity: 0.048393, inclination_deg: 1.30530, longitude_ascending_node_deg: 100.55615, longitude_perihelion_deg: 14.75385, mean_longitude_deg: 34.40438, orbital_period_days: 4332.589 }),
+        ("Saturn", "saturn", 0.24, 2.2, [0.82, 0.72, 0.50, 1.0], [0.74, 0.66, 0.48, 1.0], 0.12, 0.06, 0.96, OrbitalElements { semi_major_axis_au: 9.537070, eccentricity: 0.054151, inclination_deg: 2.48446, longitude_ascending_node_deg: 113.71504, longitude_perihelion_deg: 92.43194, mean_longitude_deg: 49.94432, orbital_period_days: 10759.22 }),
+        ("Uranus", "uranus", 0.18, 1.7, [0.52, 0.78, 0.82, 1.0], [0.42, 0.72, 0.86, 1.0], 0.18, 0.04, 0.96, OrbitalElements { semi_major_axis_au: 19.191264, eccentricity: 0.047168, inclination_deg: 0.76986, longitude_ascending_node_deg: 74.22988, longitude_perihelion_deg: 170.96424, mean_longitude_deg: 313.23218, orbital_period_days: 30685.4 }),
+        ("Neptune", "neptune", 0.175, 1.8, [0.36, 0.48, 0.86, 1.0], [0.24, 0.38, 0.82, 1.0], 0.20, 0.05, 0.96, OrbitalElements { semi_major_axis_au: 30.068963, eccentricity: 0.008586, inclination_deg: 1.76917, longitude_ascending_node_deg: 131.72169, longitude_perihelion_deg: 44.97135, mean_longitude_deg: 304.88003, orbital_period_days: 60190.0 }),
+    ];
+    for (name, texture_asset, radius_scene, rotation_multiplier, surface_color, atmosphere_color, atmosphere_strength, specular_strength, surface_texture_weight, orbit) in planets {
+        bodies.push(CelestialBody { name, texture_asset, orbit: BodyOrbit::Heliocentric(orbit), radius_scene, rotation_multiplier, surface_color, atmosphere_color, atmosphere_strength, specular_strength, surface_texture_weight });
+    }
+
+    let moons = [
+        ("Moon", 3usize, 0.00257, 27.3217, 5.14, 125.1, 0.026),
+        ("Phobos", 4usize, 0.000063, 0.3189, 1.1, 20.0, 0.012),
+        ("Deimos", 4usize, 0.000157, 1.263, 1.8, 260.0, 0.010),
+        ("Io", 5usize, 0.00282, 1.769, 0.05, 40.0, 0.020),
+        ("Europa", 5usize, 0.00449, 3.551, 0.47, 90.0, 0.018),
+        ("Ganymede", 5usize, 0.00716, 7.155, 0.20, 160.0, 0.024),
+        ("Callisto", 5usize, 0.01258, 16.689, 0.28, 240.0, 0.023),
+        ("Titan", 6usize, 0.00817, 15.945, 0.35, 70.0, 0.030),
+        ("Triton", 8usize, 0.00237, 5.877, 23.0, 180.0, 0.022),
+    ];
+    for (name, parent_index, semi_major_axis_au, orbital_period_days, inclination_deg, mean_longitude_deg, radius_scene) in moons {
+        bodies.push(CelestialBody {
+            name,
+            texture_asset: "mercury",
+            orbit: BodyOrbit::Planetocentric { parent_index, semi_major_axis_au, orbital_period_days, inclination_deg, mean_longitude_deg },
+            radius_scene,
+            rotation_multiplier: 0.7,
+            surface_color: [0.55, 0.52, 0.48, 1.0],
+            atmosphere_color: [0.42, 0.38, 0.32, 1.0],
+            atmosphere_strength: if name == "Titan" { 0.26 } else { 0.0 },
+            specular_strength: 0.01,
+            surface_texture_weight: 0.45,
+        });
+    }
+
+    for index in 0..64 {
+        let spread = index as f64 / 64.0;
+        bodies.push(CelestialBody {
+            name: "Asteroid belt object",
+            texture_asset: "mercury",
+            orbit: BodyOrbit::BeltObject {
+                semi_major_axis_au: 2.15 + 1.25 * spread,
+                eccentricity: 0.04 + 0.18 * (((index * 37) % 101) as f64 / 101.0),
+                inclination_deg: -10.0 + 20.0 * (((index * 17) % 97) as f64 / 97.0),
+                longitude_ascending_node_deg: ((index * 53) % 360) as f64,
+                longitude_perihelion_deg: ((index * 71 + 23) % 360) as f64,
+                mean_longitude_deg: ((index * 137 + 11) % 360) as f64,
+                orbital_period_days: 365.256 * (2.15 + 1.25 * spread).powf(1.5),
+            },
+            radius_scene: 0.006 + 0.006 * (((index * 29) % 11) as f32 / 10.0),
+            rotation_multiplier: 1.8,
+            surface_color: [0.34, 0.31, 0.27, 1.0],
+            atmosphere_color: [0.0, 0.0, 0.0, 1.0],
+            atmosphere_strength: 0.0,
+            specular_strength: 0.0,
+            surface_texture_weight: 0.18,
+        });
+    }
+
+    bodies
 }
 
 fn create_scene(config_text: &str, star_shell_radius: f32) -> Result<SceneDefinition, String> {
