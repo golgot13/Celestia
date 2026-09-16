@@ -1,5 +1,5 @@
 use std::f32::consts::{FRAC_PI_2, PI};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,8 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowBuilder};
 
+const PLANET_TEXTURE_LAYER_COUNT: u32 = 3;
+
 const PLANET_SHADER_WGSL: &str = r#"
 struct FrameUniform {
     view_proj: mat4x4<f32>,
@@ -25,21 +27,33 @@ struct FrameUniform {
     atmosphere_strength: f32,
     specular_power: f32,
     specular_strength: f32,
+    body_time_s: f32,
+    interior_motion: f32,
+    atmosphere_motion: f32,
+    surface_texture_weight: f32,
     _padding: f32,
 };
 
 @group(0) @binding(0)
 var<uniform> frame: FrameUniform;
 
+@group(0) @binding(1)
+var mars_layer_texture: texture_2d_array<f32>;
+
+@group(0) @binding(2)
+var mars_layer_sampler: sampler;
+
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 @vertex
@@ -48,8 +62,43 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let world = frame.model * vec4<f32>(input.position, 1.0);
     out.world_position = world.xyz;
     out.world_normal = normalize((frame.model * vec4<f32>(input.normal, 0.0)).xyz);
+    out.uv = input.uv;
     out.clip_position = frame.view_proj * world;
     return out;
+}
+
+fn hash31(p: vec3<f32>) -> f32 {
+    return fract(sin(dot(p, vec3<f32>(127.1, 311.7, 74.7))) * 43758.5453);
+}
+
+fn value_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (vec3<f32>(3.0, 3.0, 3.0) - 2.0 * f);
+
+    let x00 = mix(hash31(i + vec3<f32>(0.0, 0.0, 0.0)), hash31(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(hash31(i + vec3<f32>(0.0, 1.0, 0.0)), hash31(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(hash31(i + vec3<f32>(0.0, 0.0, 1.0)), hash31(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(hash31(i + vec3<f32>(0.0, 1.0, 1.0)), hash31(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    let y0 = mix(x00, x10, u.y);
+    let y1 = mix(x01, x11, u.y);
+    return mix(y0, y1, u.z);
+}
+
+fn fbm(p: vec3<f32>) -> f32 {
+    var q = p;
+    var amplitude = 0.50;
+    var sum = 0.0;
+    var normalization = 0.0;
+
+    for (var octave = 0; octave < 5; octave = octave + 1) {
+        sum = sum + value_noise(q) * amplitude;
+        normalization = normalization + amplitude;
+        q = q * 2.03 + vec3<f32>(11.7, 4.8, 8.3);
+        amplitude = amplitude * 0.52;
+    }
+
+    return sum / normalization;
 }
 
 @fragment
@@ -59,19 +108,53 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let v = normalize(frame.camera_pos.xyz - input.world_position);
     let h = normalize(l + v);
 
-    let ndotl = max(dot(n, l), 0.0);
+    let light_alignment = dot(n, l);
+    let ndotl = max(light_alignment, 0.0);
     let ndotv = max(dot(n, v), 0.0);
-    let diffuse = 0.12 + 0.88 * ndotl;
+    let daylight = smoothstep(-0.08, 0.42, light_alignment);
+    let terminator = smoothstep(-0.22, 0.08, light_alignment) * (1.0 - daylight);
+
+    let envelope_phase = frame.body_time_s * frame.interior_motion;
+    let atmosphere_phase = frame.body_time_s * frame.atmosphere_motion;
+    let continental = fbm(n * 2.15 + vec3<f32>(1.8, 4.1, 2.6));
+    let uplands = fbm(n * 7.20 + vec3<f32>(9.2, 1.7, 5.4));
+    let interior_flow = fbm(n * 4.20 + vec3<f32>(0.06 * envelope_phase, 0.025 * envelope_phase, -0.04 * envelope_phase));
+    let weather = fbm(n * vec3<f32>(9.0, 3.4, 9.0) + vec3<f32>(2.7 + 0.055 * atmosphere_phase, 6.1, 0.8 - 0.035 * atmosphere_phase));
+    let latitude = abs(n.y);
+    let land_mask = smoothstep(0.55, 0.66, continental + 0.11 * uplands - 0.06 * latitude);
+    let coast_mask = smoothstep(0.46, 0.58, continental) * (1.0 - land_mask);
+    let cloud_mask = smoothstep(0.62, 0.82, weather + 0.10 * (1.0 - latitude)) * smoothstep(-0.70, 0.16, light_alignment);
 
     let spec_angle = max(dot(n, h), 0.0);
-    let specular = pow(spec_angle, frame.specular_power) * frame.specular_strength;
-    let fresnel = pow(1.0 - ndotv, 3.2) * (0.55 + 0.45 * frame.atmosphere_strength);
-    let scattering = pow(ndotl, 5.0) * (0.18 + 0.82 * frame.atmosphere_strength);
+    let dust_sheen = 0.18 + 0.24 * (1.0 - land_mask);
+    let specular = pow(spec_angle, frame.specular_power) * frame.specular_strength * dust_sheen * daylight;
+    let fresnel = pow(1.0 - ndotv, 3.6) * (0.40 + 0.60 * frame.atmosphere_strength);
+    let scattering = pow(ndotl, 4.0) * (0.10 + 0.90 * frame.atmosphere_strength);
 
-    let base = frame.planet_color.rgb * (0.45 + 0.55 * diffuse);
-    let atmosphere = frame.atmosphere_color.rgb * (fresnel + scattering);
+    let interior_texel = textureSample(mars_layer_texture, mars_layer_sampler, input.uv, 0).rgb;
+    let mars_texel = textureSample(mars_layer_texture, mars_layer_sampler, input.uv, 1).rgb;
+    let atmosphere_uv = fract(input.uv + vec2<f32>(0.012 * atmosphere_phase, 0.004 * sin(0.27 * atmosphere_phase)));
+    let atmosphere_texel = textureSample(mars_layer_texture, mars_layer_sampler, atmosphere_uv, 2);
+    let observed_albedo = mars_texel * vec3<f32>(1.08, 0.88, 0.72);
+    let basalt_plain = frame.planet_color.rgb * vec3<f32>(0.48, 0.40, 0.34) + vec3<f32>(0.018, 0.012, 0.008);
+    let dust_plain = frame.planet_color.rgb * vec3<f32>(0.92, 0.66, 0.43) + vec3<f32>(0.040, 0.022, 0.012);
+    let lowland = frame.planet_color.rgb * vec3<f32>(0.74, 0.50, 0.34) + vec3<f32>(0.030, 0.016, 0.010);
+    let highland = frame.planet_color.rgb * vec3<f32>(1.08, 0.76, 0.52) + vec3<f32>(0.050, 0.030, 0.018);
+    let land = mix(lowland, highland, smoothstep(0.48, 0.78, uplands));
+    let polar = smoothstep(0.70, 0.93, latitude);
+    var surface = mix(basalt_plain, dust_plain, coast_mask * 0.78);
+    surface = mix(surface, land, land_mask);
+    surface = mix(surface, vec3<f32>(0.78, 0.72, 0.64), polar * 0.42);
+    surface = mix(surface, vec3<f32>(0.70, 0.56, 0.44), cloud_mask * 0.10 * daylight);
+    surface = mix(surface, observed_albedo, frame.surface_texture_weight);
 
-    let color = base + atmosphere + vec3<f32>(specular, specular, specular);
+    let direct_light = 0.018 + 0.982 * daylight * (0.24 + 0.76 * ndotl);
+    let nightside = interior_texel * (0.016 + 0.020 * interior_flow) * (1.0 - daylight);
+    let atmosphere_density = 0.68 + 0.44 * atmosphere_texel.a;
+    let dust_scatter = atmosphere_texel.rgb * 0.030 * daylight * frame.atmosphere_strength;
+    let atmosphere = frame.atmosphere_color.rgb * (0.48 * fresnel + 0.34 * scattering + 0.22 * terminator) * atmosphere_density + dust_scatter;
+
+    let color = surface * direct_light + nightside + atmosphere + vec3<f32>(specular, specular, specular);
     return vec4<f32>(color, 1.0);
 }
 "#;
@@ -157,12 +240,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 struct MeshVertex {
     position: [f32; 3],
     normal: [f32; 3],
+    uv: [f32; 2],
 }
 
 impl MeshVertex {
     fn layout<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRS: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<MeshVertex>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Vertex,
@@ -221,15 +305,29 @@ struct FrameUniform {
     atmosphere_strength: f32,
     specular_power: f32,
     specular_strength: f32,
+    body_time_s: f32,
+    interior_motion: f32,
+    atmosphere_motion: f32,
+    surface_texture_weight: f32,
     _padding: f32,
 }
 
-#[repr(C, align(16))]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug)]
 struct ViewUniform {
-    view_proj: [[f32; 4]; 4],
-    time_s: f32,
-    _padding: [f32; 4],
+    bytes: [u8; 96],
+}
+
+impl ViewUniform {
+    fn new(view_proj: Mat4, time_s: f32) -> Self {
+        let mut bytes = [0u8; 96];
+        for (index, value) in view_proj.to_cols_array().iter().enumerate() {
+            let offset = index * std::mem::size_of::<f32>();
+            bytes[offset..offset + std::mem::size_of::<f32>()]
+                .copy_from_slice(&value.to_ne_bytes());
+        }
+        bytes[64..68].copy_from_slice(&time_s.to_ne_bytes());
+        Self { bytes }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -267,8 +365,8 @@ impl Default for CliOptions {
             planet_radius: 1.0,
             star_shell_radius: 45.0,
             planet_rotation_deg_per_s: 7.5,
-            atmosphere_strength: 0.65,
-            show_guides: true,
+            atmosphere_strength: 0.18,
+            show_guides: false,
         }
     }
 }
@@ -355,6 +453,18 @@ struct DepthBuffer {
     view: wgpu::TextureView,
 }
 
+#[derive(Debug)]
+struct TextureLodImage {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+}
+
+struct PlanetLayerTextures {
+    layer_view: wgpu::TextureView,
+    layer_sampler: wgpu::Sampler,
+}
+
 impl DepthBuffer {
     fn new(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -398,6 +508,7 @@ struct RenderState {
     frame_uniform: FrameUniform,
     frame_buffer: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
+    _planet_layers: PlanetLayerTextures,
 
     view_uniform: ViewUniform,
     view_buffer: wgpu::Buffer,
@@ -526,20 +637,24 @@ impl RenderState {
                 0.0,
             ],
             planet_color: [
-                (planet_color[0] * 0.85 + sky_tint[0] * 0.12 + solar_glow[0] * 0.08).clamp(0.0, 1.0),
-                (planet_color[1] * 0.85 + sky_tint[1] * 0.12 + solar_glow[1] * 0.08).clamp(0.0, 1.0),
-                (planet_color[2] * 0.85 + sky_tint[2] * 0.12 + solar_glow[2] * 0.08).clamp(0.0, 1.0),
+                (planet_color[0] * 0.94 + sky_tint[0] * 0.03 + solar_glow[0] * 0.03).clamp(0.0, 1.0),
+                (planet_color[1] * 0.94 + sky_tint[1] * 0.03 + solar_glow[1] * 0.03).clamp(0.0, 1.0),
+                (planet_color[2] * 0.94 + sky_tint[2] * 0.03 + solar_glow[2] * 0.03).clamp(0.0, 1.0),
                 1.0,
             ],
             atmosphere_color: [
-                (atmosphere_color[0] * 0.74 + sky_tint[0] * 0.18 + solar_glow[0] * 0.18).clamp(0.0, 1.0),
-                (atmosphere_color[1] * 0.74 + sky_tint[1] * 0.18 + solar_glow[1] * 0.18).clamp(0.0, 1.0),
-                (atmosphere_color[2] * 0.74 + sky_tint[2] * 0.18 + solar_glow[2] * 0.18).clamp(0.0, 1.0),
+                (atmosphere_color[0] * 0.88 + sky_tint[0] * 0.04 + solar_glow[0] * 0.08).clamp(0.0, 1.0),
+                (atmosphere_color[1] * 0.88 + sky_tint[1] * 0.04 + solar_glow[1] * 0.08).clamp(0.0, 1.0),
+                (atmosphere_color[2] * 0.88 + sky_tint[2] * 0.04 + solar_glow[2] * 0.08).clamp(0.0, 1.0),
                 1.0,
             ],
             atmosphere_strength: options.atmosphere_strength,
             specular_power: 48.0,
-            specular_strength: 0.18,
+            specular_strength: 0.045,
+            body_time_s: 0.0,
+            interior_motion: 0.35,
+            atmosphere_motion: 1.0,
+            surface_texture_weight: 0.92,
             _padding: 0.0,
         };
 
@@ -549,39 +664,65 @@ impl RenderState {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
-        let view_uniform = ViewUniform {
-            view_proj: view_proj.to_cols_array_2d(),
-            time_s: 0.0,
-            _padding: [0.0; 4],
-        };
+        let planet_layers = load_planet_layer_textures(&device, &queue)?;
+
+        let view_uniform = ViewUniform::new(view_proj, 0.0);
 
         let view_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("view_uniform_buffer"),
-            contents: bytemuck::bytes_of(&view_uniform),
+            contents: &view_uniform.bytes,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
 
         let frame_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frame_bind_group_layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
         });
 
         let frame_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("frame_bind_group"),
             layout: &frame_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&planet_layers.layer_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&planet_layers.layer_sampler),
+                },
+            ],
         });
 
         let view_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -851,7 +992,7 @@ impl RenderState {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let background_stars = generate_background_stars(600, 120.0);
+        let background_stars = generate_background_stars(2400, 120.0);
         let star_vertices: Vec<StarVertex> = background_stars
             .into_iter()
             .chain(scene.targets.iter().map(|target| StarVertex {
@@ -911,7 +1052,7 @@ impl RenderState {
         let egui_renderer = egui_wgpu::Renderer::new(
             &device,
             config.format,
-            Some(wgpu::TextureFormat::Depth32Float),
+            None,
             1,
         );
 
@@ -931,6 +1072,7 @@ impl RenderState {
             frame_uniform,
             frame_buffer,
             frame_bind_group,
+            _planet_layers: planet_layers,
             view_uniform,
             view_buffer,
             view_bind_group,
@@ -1091,10 +1233,9 @@ impl RenderState {
 
         let aspect = self.config.width as f32 / self.config.height as f32;
         let view_proj = self.camera.view_proj(aspect);
-        self.view_uniform.view_proj = view_proj.to_cols_array_2d();
-        self.view_uniform.time_s = self.elapsed_time_s;
+        self.view_uniform = ViewUniform::new(view_proj, self.elapsed_time_s);
         self.queue
-            .write_buffer(&self.view_buffer, 0, bytemuck::bytes_of(&self.view_uniform));
+            .write_buffer(&self.view_buffer, 0, &self.view_uniform.bytes);
 
         let planet_model = Mat4::from_rotation_y(self.planet_rotation_rad);
         let light_dir = Vec3::new(self.light_orbit_rad.cos(), 0.30, self.light_orbit_rad.sin()).normalize();
@@ -1127,6 +1268,10 @@ impl RenderState {
             1.0,
         ];
         self.frame_uniform.atmosphere_strength = self.atmosphere_strength;
+        self.frame_uniform.body_time_s = self.elapsed_time_s;
+        self.frame_uniform.interior_motion = 0.35;
+        self.frame_uniform.atmosphere_motion = 1.0;
+        self.frame_uniform.surface_texture_weight = 0.92;
 
         self.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&self.frame_uniform));
@@ -1290,18 +1435,18 @@ impl RenderState {
                 occlusion_query_set: None,
             });
 
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
+            pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.sky_index_count, 0, 0..1);
+
             if self.star_count > 0 {
                 pass.set_pipeline(&self.star_pipeline);
                 pass.set_bind_group(0, &self.view_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.star_vertex_buffer.slice(..));
                 pass.draw(0..self.star_count, 0..1);
             }
-
-            pass.set_pipeline(&self.sky_pipeline);
-            pass.set_bind_group(0, &self.view_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
-            pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.sky_index_count, 0, 0..1);
 
             if self.show_guides && self.guide_vertex_count > 1 {
                 pass.set_pipeline(&self.guide_pipeline);
@@ -1347,6 +1492,214 @@ impl RenderState {
 
         Ok(())
     }
+}
+
+fn load_planet_layer_textures(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<PlanetLayerTextures, String> {
+    let base_dir = Path::new("assets").join("textures").join("mars");
+    let lod_names = ["lod0.ppm", "lod1.ppm", "lod2.ppm", "lod3.ppm"];
+    let lods: Vec<TextureLodImage> = lod_names
+        .iter()
+        .map(|name| load_ppm_rgb(&base_dir.join(name)))
+        .collect::<Result<_, _>>()?;
+
+    let layer_texture = create_mipmapped_layer_texture(
+        device,
+        queue,
+        "mars_body_multilayer_lod_texture",
+        &lods,
+    )?;
+    let layer_view = layer_texture.create_view(&wgpu::TextureViewDescriptor {
+        label: Some("mars_body_layer_view"),
+        dimension: Some(wgpu::TextureViewDimension::D2Array),
+        ..Default::default()
+    });
+    let layer_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("mars_body_lod_sampler"),
+        address_mode_u: wgpu::AddressMode::Repeat,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
+        mipmap_filter: wgpu::FilterMode::Linear,
+        ..Default::default()
+    });
+
+    Ok(PlanetLayerTextures {
+        layer_view,
+        layer_sampler,
+    })
+}
+
+fn create_mipmapped_layer_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    lods: &[TextureLodImage],
+) -> Result<wgpu::Texture, String> {
+    let Some(base_lod) = lods.first() else {
+        return Err("missing Mars texture LOD images".to_string());
+    };
+
+    for (index, lod) in lods.iter().enumerate() {
+        if lod.rgb.len() != (lod.width as usize * lod.height as usize * 3) {
+            return Err(format!("invalid RGB data length for Mars LOD {index}"));
+        }
+        if index > 0 {
+            let previous = &lods[index - 1];
+            if lod.width != previous.width / 2 || lod.height != previous.height / 2 {
+                return Err(format!("Mars LOD {index} is not half of previous level"));
+            }
+        }
+    }
+
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: base_lod.width,
+            height: base_lod.height,
+            depth_or_array_layers: PLANET_TEXTURE_LAYER_COUNT,
+        },
+        mip_level_count: lods.len() as u32,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    for (mip_level, lod) in lods.iter().enumerate() {
+        for layer in 0..PLANET_TEXTURE_LAYER_COUNT {
+            let rgba = build_mars_layer_rgba(lod, layer);
+            queue.write_texture(
+                wgpu::ImageCopyTexture {
+                    texture: &texture,
+                    mip_level: mip_level as u32,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &rgba,
+                wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * lod.width),
+                    rows_per_image: Some(lod.height),
+                },
+                wgpu::Extent3d {
+                    width: lod.width,
+                    height: lod.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+    }
+
+    Ok(texture)
+}
+
+fn build_mars_layer_rgba(lod: &TextureLodImage, layer: u32) -> Vec<u8> {
+    let mut rgba = Vec::with_capacity(lod.width as usize * lod.height as usize * 4);
+    for pixel in lod.rgb.chunks_exact(3) {
+        let red = pixel[0] as f32;
+        let green = pixel[1] as f32;
+        let blue = pixel[2] as f32;
+        let luminance = (0.2126 * red + 0.7152 * green + 0.0722 * blue) / 255.0;
+
+        match layer {
+            0 => {
+                rgba.push((34.0 + 82.0 * luminance).round() as u8);
+                rgba.push((12.0 + 34.0 * luminance).round() as u8);
+                rgba.push((8.0 + 24.0 * luminance).round() as u8);
+                rgba.push(255);
+            }
+            1 => rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], 255]),
+            2 => {
+                let dust_alpha = (32.0 + 116.0 * luminance).round() as u8;
+                rgba.push((180.0 + 42.0 * luminance).round() as u8);
+                rgba.push((112.0 + 38.0 * luminance).round() as u8);
+                rgba.push((72.0 + 24.0 * luminance).round() as u8);
+                rgba.push(dust_alpha);
+            }
+            _ => unreachable!("invalid Mars texture layer"),
+        }
+    }
+    rgba
+}
+
+fn load_ppm_rgb(path: &Path) -> Result<TextureLodImage, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("failed to read Mars texture '{}': {error}", path.display()))?;
+    parse_ppm_rgb(&bytes).map_err(|error| format!("invalid Mars texture '{}': {error}", path.display()))
+}
+
+fn parse_ppm_rgb(bytes: &[u8]) -> Result<TextureLodImage, String> {
+    let mut cursor = 0usize;
+    let magic = next_ppm_token(bytes, &mut cursor).ok_or_else(|| "missing PPM magic".to_string())?;
+    if magic != "P6" {
+        return Err(format!("unsupported PPM magic '{magic}'"));
+    }
+
+    let width = next_ppm_token(bytes, &mut cursor)
+        .ok_or_else(|| "missing PPM width".to_string())?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid PPM width: {error}"))?;
+    let height = next_ppm_token(bytes, &mut cursor)
+        .ok_or_else(|| "missing PPM height".to_string())?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid PPM height: {error}"))?;
+    let max_value = next_ppm_token(bytes, &mut cursor)
+        .ok_or_else(|| "missing PPM max value".to_string())?
+        .parse::<u32>()
+        .map_err(|error| format!("invalid PPM max value: {error}"))?;
+    if width == 0 || height == 0 {
+        return Err("PPM dimensions must be non-zero".to_string());
+    }
+    if max_value != 255 {
+        return Err(format!("unsupported PPM max value {max_value}"));
+    }
+
+    if cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+
+    let expected = width as usize * height as usize * 3;
+    let remaining = bytes.len().saturating_sub(cursor);
+    if remaining != expected {
+        return Err(format!("expected {expected} RGB bytes, found {remaining}"));
+    }
+
+    Ok(TextureLodImage {
+        width,
+        height,
+        rgb: bytes[cursor..].to_vec(),
+    })
+}
+
+fn next_ppm_token(bytes: &[u8], cursor: &mut usize) -> Option<String> {
+    loop {
+        while *cursor < bytes.len() && bytes[*cursor].is_ascii_whitespace() {
+            *cursor += 1;
+        }
+        if *cursor >= bytes.len() || bytes[*cursor] != b'#' {
+            break;
+        }
+        while *cursor < bytes.len() && bytes[*cursor] != b'\n' {
+            *cursor += 1;
+        }
+    }
+
+    let start = *cursor;
+    while *cursor < bytes.len() && !bytes[*cursor].is_ascii_whitespace() {
+        *cursor += 1;
+    }
+    if start == *cursor {
+        return None;
+    }
+
+    std::str::from_utf8(&bytes[start..*cursor])
+        .ok()
+        .map(str::to_string)
 }
 
 fn create_vertex_buffer_with_fallback<T: Pod>(
@@ -1674,15 +2027,15 @@ fn atmospheric_palette(atmosphere_strength: f32, light_tilt: f32) -> ([f32; 4], 
     let dawn_glow = (1.0 - (light_tilt - 0.65).abs() / 0.65).clamp(0.0, 1.0);
 
     let planet = [
-        0.09 + 0.12 * day_mix + 0.08 * dawn_glow,
-        0.18 + 0.30 * day_mix + 0.12 * dawn_glow,
-        0.36 + 0.42 * day_mix + 0.18 * dawn_glow,
+        0.025 + 0.070 * day_mix + 0.040 * dawn_glow,
+        0.060 + 0.155 * day_mix + 0.055 * dawn_glow,
+        0.120 + 0.260 * day_mix + 0.075 * dawn_glow,
         1.0,
     ];
     let atmosphere = [
-        0.16 + 0.48 * glow + 0.20 * dawn_glow,
-        0.30 + 0.50 * glow + 0.24 * dawn_glow,
-        0.72 + 0.22 * glow + 0.12 * dawn_glow,
+        0.035 + 0.170 * glow + 0.090 * dawn_glow,
+        0.080 + 0.240 * glow + 0.110 * dawn_glow,
+        0.180 + 0.320 * glow + 0.150 * dawn_glow,
         1.0,
     ];
 
@@ -1691,20 +2044,17 @@ fn atmospheric_palette(atmosphere_strength: f32, light_tilt: f32) -> ([f32; 4], 
 
 fn sky_background_color(elevation: f32, time_of_day: f32) -> [f32; 3] {
     let norm = elevation.clamp(-1.0, 1.0);
-    let daylight = (0.5 + 0.5 * (time_of_day * 0.1).sin()).clamp(0.1, 1.0);
     let zenith_factor = (norm + 1.0) * 0.5;
     let horizon_factor = (1.0 - zenith_factor).max(0.0);
     let solar_altitude = (time_of_day * 0.12).sin().clamp(-1.0, 1.0);
-    let twilight = (1.0 - solar_altitude.abs()).clamp(0.0, 1.0);
-
-    let rayleigh = 0.09 + 0.36 * daylight + 0.18 * zenith_factor;
-    let ozone = 0.04 + 0.28 * daylight + 0.10 * twilight;
-    let haze = 0.06 + 0.22 * horizon_factor;
+    let zodiacal = 0.014 * (1.0 - solar_altitude.max(0.0)).clamp(0.0, 1.0);
+    let airglow = 0.003 + 0.003 * horizon_factor;
+    let deep_space = 0.005 + 0.018 * zenith_factor;
 
     [
-        0.01 + rayleigh + 0.12 * zenith_factor - haze,
-        0.02 + 0.95 * rayleigh + 0.18 * zenith_factor - 0.15 * horizon_factor,
-        0.05 + 1.35 * rayleigh + ozone + 0.22 * zenith_factor + 0.18 * horizon_factor,
+        deep_space * 0.62 + airglow * 0.32 + zodiacal * 0.18,
+        deep_space * 0.92 + airglow * 0.42 + zodiacal * 0.15,
+        deep_space * 1.85 + airglow * 0.58 + zodiacal * 0.12,
     ]
 }
 
@@ -1847,6 +2197,7 @@ fn generate_uv_sphere(
             vertices.push(MeshVertex {
                 position: [radius * nx, radius * ny, radius * nz],
                 normal: [nx, ny, nz],
+                uv: [1.0 - u, v],
             });
         }
     }
@@ -2028,9 +2379,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        atmospheric_palette, generate_background_stars, generate_sky_dome, parse_cli_args,
-        priority_to_luminance, ra_dec_to_cartesian, ra_dec_to_cartesian_f64, sky_background_color,
-        solar_halo_color, tone_map_color,
+        atmospheric_palette, generate_background_stars, generate_sky_dome, generate_uv_sphere,
+        parse_cli_args, parse_ppm_rgb, priority_to_luminance, ra_dec_to_cartesian,
+        ra_dec_to_cartesian_f64, sky_background_color, solar_halo_color, tone_map_color,
     };
     use observatory_core::CampaignTargetConfig;
 
@@ -2137,6 +2488,30 @@ mod tests {
         assert_eq!(vertices.len(), (8 + 1) * (12 + 1));
         assert_eq!(indices.len(), 8 * 12 * 6);
         assert!(vertices.iter().all(|vertex| vertex.position.iter().all(|value| value.is_finite())));
+    }
+
+    #[test]
+    fn generate_uv_sphere_assigns_texture_coordinates() {
+        let (vertices, indices) = generate_uv_sphere(8, 4, 1.0);
+        assert_eq!(vertices.len(), (8 + 1) * (4 + 1));
+        assert_eq!(indices.len(), 8 * 4 * 6);
+        assert!(vertices.iter().all(|vertex| {
+            vertex.uv[0].is_finite()
+                && vertex.uv[1].is_finite()
+                && vertex.uv[0] >= 0.0
+                && vertex.uv[0] <= 1.0
+                && vertex.uv[1] >= 0.0
+                && vertex.uv[1] <= 1.0
+        }));
+    }
+
+    #[test]
+    fn parse_ppm_rgb_reads_binary_lod_image() {
+        let ppm = b"P6\n# generated test texture\n2 1\n255\n\x0a\x20\x30\x40\x50\x60";
+        let image = parse_ppm_rgb(ppm).expect("PPM should parse");
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.rgb, vec![0x0a, 0x20, 0x30, 0x40, 0x50, 0x60]);
     }
 
     #[test]
