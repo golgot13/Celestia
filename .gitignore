@@ -24,3 +24,6 @@ Release/
 /content
 CMakeSettings.json
 __pycache__
+/src-rs/**/target/
+/target/
+/nextgen/rust_app/target/

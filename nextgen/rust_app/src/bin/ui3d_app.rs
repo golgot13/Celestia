@@ -541,6 +541,8 @@ impl ViewUniform {
 #[derive(Clone, Debug, PartialEq)]
 struct CliOptions {
     config_path: Option<String>,
+    catalog_path: Option<String>,
+    catalog_limit: f64,
     filter: String,
     exposure_s: f64,
     repeats: usize,
@@ -560,6 +562,8 @@ impl Default for CliOptions {
     fn default() -> Self {
         Self {
             config_path: None,
+            catalog_path: None,
+            catalog_limit: 12.0,
             filter: "R".to_string(),
             exposure_s: 60.0,
             repeats: 2,
@@ -1557,12 +1561,16 @@ impl RenderState {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let background_stars = generate_background_stars(2400, 120.0);
+        let background_stars = match options.catalog_path.as_deref() {
+            Some(path) => load_catalog_stars(path, options.catalog_limit, options.star_shell_radius)?,
+            None => generate_background_stars(2400, 120.0),
+        };
         let star_vertices: Vec<StarVertex> = background_stars
             .into_iter()
             .chain(scene.targets.iter().map(|target| StarVertex {
                 position: target.position,
-                luminance: target.luminance,
+                color: [1.0; 3],
+                irradiance: target.luminance,
             }))
             .collect();
 
@@ -3897,7 +3905,10 @@ fn load_surface_texture(
     queue: &wgpu::Queue,
     asset_name: &str,
 ) -> Result<SurfaceTexture, String> {
-    let base_dir = Path::new("assets").join("textures").join(asset_name);
+    let base_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets")
+        .join("textures")
+        .join(asset_name);
     let lod_names = ["lod0.ppm", "lod1.ppm", "lod2.ppm", "lod3.ppm"];
     let lods: Vec<PpmImage> = lod_names
         .iter()
@@ -4290,6 +4301,25 @@ fn parse_cli_args(args: &[String]) -> CliOptions {
     let mut i = 0usize;
     while i < args.len() {
         match args[i].as_str() {
+            "--catalog" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("missing value after --catalog");
+                    std::process::exit(1);
+                };
+                options.catalog_path = Some(value.clone());
+                i += 2;
+            }
+            "--catalog-limit" => {
+                let Some(value) = args.get(i + 1) else {
+                    eprintln!("missing value after --catalog-limit");
+                    std::process::exit(1);
+                };
+                options.catalog_limit = value.parse::<f64>().unwrap_or_else(|_| {
+                    eprintln!("invalid --catalog-limit value: '{value}'");
+                    std::process::exit(1);
+                });
+                i += 2;
+            }
             "--filter" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!("missing value after --filter");
@@ -4457,6 +4487,10 @@ fn parse_cli_args(args: &[String]) -> CliOptions {
         eprintln!("--star-radius must be larger than 1 au");
         std::process::exit(1);
     }
+    if options.catalog_limit.is_nan() {
+        eprintln!("--catalog-limit must be finite");
+        std::process::exit(1);
+    }
     if options.exposure <= 0.0 {
         eprintln!("--display-exposure must be strictly positive");
         std::process::exit(1);
@@ -4487,6 +4521,8 @@ fn print_usage() {
     println!("  --far <value>              far clipping plane in au (default: 400)");
     println!();
     println!("3D scene:");
+    println!("  --catalog <path>           stellar catalogue (stars.dat, Hipparcos or CSV/TSV)");
+    println!("  --catalog-limit <mag>      faintest apparent magnitude to render (default: 12)");
     println!("  --star-radius <value>      radius of the target star shell in au (default: 45)");
     println!("  --display-exposure <value> display exposure of the tone mapper (default: 1.6)");
     println!("  --time-scale <factor>      simulated time acceleration, 1 = real time");
@@ -4671,7 +4707,8 @@ fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
         let luminance = 0.15 + 0.85 * (0.45 + 0.55 * u2);
         stars.push(StarVertex {
             position: [x, y, z],
-            luminance,
+            color: [1.0; 3],
+            irradiance: luminance,
         });
     }
 
@@ -5008,7 +5045,7 @@ mod tests {
                 + star.position[1] * star.position[1]
                 + star.position[2] * star.position[2];
             assert!((radius_sq - 120.0 * 120.0).abs() < 1.0);
-            assert!((star.luminance >= 0.15) && (star.luminance <= 1.0));
+            assert!((star.irradiance >= 0.15) && (star.irradiance <= 1.0));
         }
     }
 
@@ -5218,4 +5255,35 @@ mod tests {
             previous = depth;
         }
     }
+}
+
+fn load_catalog_stars(path: &str, limiting_magnitude: f64, radius: f32) -> Result<Vec<StarVertex>, String> {
+    let catalog = observatory_core::load_star_catalog(path)?;
+    let stars = catalog.brighter_than(limiting_magnitude);
+    let mut vertices = Vec::with_capacity(stars.len());
+
+    for star in stars {
+        let position = equatorial_to_scene_direction(
+            star.right_ascension_deg,
+            star.declination_deg,
+        ) * radius as f64;
+        let color = observatory_core::blackbody_srgb(
+            observatory_core::effective_temperature_from_b_v(star.color_index_b_v),
+        );
+        let irradiance = 10.0_f64.powf(-0.4 * (star.apparent_magnitude + 1.0))
+            .clamp(0.02, 1.0) as f32;
+        vertices.push(StarVertex {
+            position: [position.x as f32, position.y as f32, position.z as f32],
+            color,
+            irradiance,
+        });
+    }
+
+    if vertices.is_empty() {
+        return Err(format!(
+            "catalogue '{path}' contains no stars at magnitude <= {limiting_magnitude}"
+        ));
+    }
+
+    Ok(vertices)
 }
