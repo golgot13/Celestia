@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use bytemuck::{Pod, Zeroable};
 use egui::{Color32, RichText};
-use glam::{Mat4, Vec3};
+use glam::{DMat4, DVec3, Mat4, Vec3};
 use observatory_core::{build_application, parse_campaign_config, CampaignTargetConfig};
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -295,34 +295,44 @@ struct RuntimeSummary {
 
 #[derive(Debug)]
 struct Camera {
-    yaw: f32,
-    pitch: f32,
-    distance: f32,
+    yaw: f64,
+    pitch: f64,
+    distance: f64,
     fov_deg: f32,
     near_plane: f32,
     far_plane: f32,
 }
 
 impl Camera {
-    fn eye(&self) -> Vec3 {
+    fn eye(&self) -> DVec3 {
         let x = self.distance * self.pitch.cos() * self.yaw.cos();
         let y = self.distance * self.pitch.sin();
         let z = self.distance * self.pitch.cos() * self.yaw.sin();
-        Vec3::new(x, y, z)
+        DVec3::new(x, y, z)
     }
 
-    fn view_proj(&self, aspect: f32) -> Mat4 {
+    fn view_proj_f64(&self, aspect: f64) -> DMat4 {
         let eye = self.eye();
-        let center = Vec3::ZERO;
-        let up = Vec3::Y;
-        let view = Mat4::look_at_rh(eye, center, up);
-        let proj = Mat4::perspective_rh(self.fov_deg.to_radians(), aspect, self.near_plane, self.far_plane);
+        let center = DVec3::ZERO;
+        let up = DVec3::Y;
+        let view = DMat4::look_at_rh(eye, center, up);
+        let proj = DMat4::perspective_rh(self.fov_deg as f64, aspect, self.near_plane as f64, self.far_plane as f64);
         proj * view
     }
 
+    fn view_proj(&self, aspect: f32) -> Mat4 {
+        let view_proj = self.view_proj_f64(aspect as f64).to_cols_array_2d();
+        Mat4::from_cols_array_2d(&[
+            [view_proj[0][0] as f32, view_proj[0][1] as f32, view_proj[0][2] as f32, view_proj[0][3] as f32],
+            [view_proj[1][0] as f32, view_proj[1][1] as f32, view_proj[1][2] as f32, view_proj[1][3] as f32],
+            [view_proj[2][0] as f32, view_proj[2][1] as f32, view_proj[2][2] as f32, view_proj[2][3] as f32],
+            [view_proj[3][0] as f32, view_proj[3][1] as f32, view_proj[3][2] as f32, view_proj[3][3] as f32],
+        ])
+    }
+
     fn reset(&mut self) {
-        self.yaw = 0.25 * PI;
-        self.pitch = 0.18 * PI;
+        self.yaw = 0.25 * PI as f64;
+        self.pitch = 0.18 * PI as f64;
         self.distance = 5.5;
     }
 }
@@ -381,6 +391,7 @@ struct RenderState {
 
     planet_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
+    sky_pipeline: wgpu::RenderPipeline,
     guide_pipeline: wgpu::RenderPipeline,
 
     frame_uniform: FrameUniform,
@@ -397,6 +408,9 @@ struct RenderState {
 
     star_vertex_buffer: wgpu::Buffer,
     star_count: u32,
+    sky_vertex_buffer: wgpu::Buffer,
+    sky_index_buffer: wgpu::Buffer,
+    sky_index_count: u32,
 
     guide_vertex_buffer: wgpu::Buffer,
     guide_vertex_count: u32,
@@ -483,8 +497,8 @@ impl RenderState {
         let depth = DepthBuffer::new(&device, &config);
 
         let camera = Camera {
-            yaw: 0.25 * PI,
-            pitch: 0.18 * PI,
+            yaw: 0.25 * PI as f64,
+            pitch: 0.18 * PI as f64,
             distance: 5.5,
             fov_deg: options.fov_deg,
             near_plane: options.near_plane,
@@ -493,14 +507,35 @@ impl RenderState {
 
         let aspect = config.width as f32 / config.height as f32;
         let view_proj = camera.view_proj(aspect);
+        let sky_tint = tone_map_color(sky_background_color(0.75, 8.0));
+        let solar_glow = solar_halo_color(0.75, 0.9);
+        let (planet_color, atmosphere_color) = atmospheric_palette(
+            options.atmosphere_strength,
+            0.75,
+        );
 
         let frame_uniform = FrameUniform {
             view_proj: view_proj.to_cols_array_2d(),
             model: Mat4::IDENTITY.to_cols_array_2d(),
             light_dir: [0.7, 0.35, 0.61, 0.0],
-            camera_pos: [camera.eye().x, camera.eye().y, camera.eye().z, 0.0],
-            planet_color: [0.15, 0.37, 0.76, 1.0],
-            atmosphere_color: [0.34, 0.61, 0.98, 1.0],
+            camera_pos: [
+                camera.eye().x as f32,
+                camera.eye().y as f32,
+                camera.eye().z as f32,
+                0.0,
+            ],
+            planet_color: [
+                (planet_color[0] * 0.85 + sky_tint[0] * 0.12 + solar_glow[0] * 0.08).clamp(0.0, 1.0),
+                (planet_color[1] * 0.85 + sky_tint[1] * 0.12 + solar_glow[1] * 0.08).clamp(0.0, 1.0),
+                (planet_color[2] * 0.85 + sky_tint[2] * 0.12 + solar_glow[2] * 0.08).clamp(0.0, 1.0),
+                1.0,
+            ],
+            atmosphere_color: [
+                (atmosphere_color[0] * 0.74 + sky_tint[0] * 0.18 + solar_glow[0] * 0.18).clamp(0.0, 1.0),
+                (atmosphere_color[1] * 0.74 + sky_tint[1] * 0.18 + solar_glow[1] * 0.18).clamp(0.0, 1.0),
+                (atmosphere_color[2] * 0.74 + sky_tint[2] * 0.18 + solar_glow[2] * 0.18).clamp(0.0, 1.0),
+                1.0,
+            ],
             atmosphere_strength: options.atmosphere_strength,
             specular_power: 48.0,
             specular_strength: 0.18,
@@ -586,6 +621,43 @@ impl RenderState {
             source: wgpu::ShaderSource::Wgsl(GUIDE_SHADER_WGSL.into()),
         });
 
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sky_shader"),
+            source: wgpu::ShaderSource::Wgsl(r#"
+                struct ViewUniform {
+                    view_proj: mat4x4<f32>,
+                    time_s: f32,
+                    _pad0: vec3<f32>,
+                };
+
+                @group(0) @binding(0)
+                var<uniform> view_data: ViewUniform;
+
+                struct VertexInput {
+                    @location(0) position: vec3<f32>,
+                    @location(1) color: vec3<f32>,
+                };
+
+                struct VertexOutput {
+                    @builtin(position) clip_position: vec4<f32>,
+                    @location(0) color: vec3<f32>,
+                };
+
+                @vertex
+                fn vs_main(input: VertexInput) -> VertexOutput {
+                    var out: VertexOutput;
+                    out.clip_position = view_data.view_proj * vec4<f32>(input.position, 1.0);
+                    out.color = input.color;
+                    return out;
+                }
+
+                @fragment
+                fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+                    return vec4<f32>(input.color, 1.0);
+                }
+            "#.into()),
+        });
+
         let planet_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planet_pipeline_layout"),
             bind_group_layouts: &[&frame_bind_group_layout],
@@ -661,6 +733,49 @@ impl RenderState {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::PointList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky_pipeline_layout"),
+            bind_group_layouts: &[&view_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sky_pipeline"),
+            layout: Some(&sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: "vs_main",
+                buffers: &[GuideVertex::layout()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
@@ -763,6 +878,20 @@ impl RenderState {
             });
         }
 
+        let (sky_vertices, sky_indices) = generate_sky_dome(32, 24, 120.0);
+        let sky_vertex_buffer = create_vertex_buffer_with_fallback(
+            &device,
+            "sky_vertex_buffer",
+            &sky_vertices,
+            wgpu::BufferUsages::VERTEX,
+        );
+        let sky_index_buffer = create_vertex_buffer_with_fallback(
+            &device,
+            "sky_index_buffer",
+            &sky_indices,
+            wgpu::BufferUsages::INDEX,
+        );
+
         let guide_vertex_buffer = create_vertex_buffer_with_fallback(
             &device,
             "guide_vertex_buffer",
@@ -796,6 +925,7 @@ impl RenderState {
             depth,
             planet_pipeline,
             star_pipeline,
+            sky_pipeline,
             guide_pipeline,
             frame_uniform,
             frame_buffer,
@@ -808,6 +938,9 @@ impl RenderState {
             planet_index_count: planet_indices.len() as u32,
             star_vertex_buffer,
             star_count: star_vertices.len() as u32,
+            sky_vertex_buffer,
+            sky_index_buffer,
+            sky_index_count: sky_indices.len() as u32,
             guide_vertex_buffer,
             guide_vertex_count: guide_vertices.len() as u32,
             camera,
@@ -856,8 +989,8 @@ impl RenderState {
             WindowEvent::CursorMoved { position, .. } => {
                 if self.input.mouse_drag_active {
                     if let Some((last_x, last_y)) = self.input.last_cursor {
-                        let dx = (position.x - last_x) as f32;
-                        let dy = (position.y - last_y) as f32;
+                        let dx = (position.x - last_x) as f64;
+                        let dy = (position.y - last_y) as f64;
                         self.camera.yaw += dx * 0.0042;
                         self.camera.pitch -= dy * 0.0038;
                     }
@@ -914,9 +1047,10 @@ impl RenderState {
     }
 
     fn update(&mut self, dt_s: f32) {
-        let yaw_speed = 1.05;
-        let pitch_speed = 0.95;
-        let zoom_speed = 2.8;
+        let yaw_speed = 1.05_f64;
+        let pitch_speed = 0.95_f64;
+        let zoom_speed = 2.8_f64;
+        let dt_s = dt_s as f64;
 
         if self.input.yaw_left {
             self.camera.yaw -= yaw_speed * dt_s;
@@ -938,20 +1072,20 @@ impl RenderState {
         }
 
         if self.input.pending_scroll.abs() > f32::EPSILON {
-            self.camera.distance -= self.input.pending_scroll * 0.45;
+            self.camera.distance -= self.input.pending_scroll as f64 * 0.45;
             self.input.pending_scroll = 0.0;
         }
 
         self.camera.pitch = self
             .camera
             .pitch
-            .clamp(-FRAC_PI_2 + 0.02, FRAC_PI_2 - 0.02);
+            .clamp(-(FRAC_PI_2 as f64) + 0.02, (FRAC_PI_2 as f64) - 0.02);
         self.camera.distance = self.camera.distance.clamp(1.8, 80.0);
 
         if !self.paused {
-            self.planet_rotation_rad += self.planet_rotation_deg_per_s.to_radians() * dt_s;
-            self.light_orbit_rad += 0.16 * dt_s;
-            self.elapsed_time_s += dt_s;
+            self.planet_rotation_rad += self.planet_rotation_deg_per_s.to_radians() * dt_s as f32;
+            self.light_orbit_rad += 0.16 * dt_s as f32;
+            self.elapsed_time_s += dt_s as f32;
         }
 
         let aspect = self.config.width as f32 / self.config.height as f32;
@@ -963,15 +1097,33 @@ impl RenderState {
 
         let planet_model = Mat4::from_rotation_y(self.planet_rotation_rad);
         let light_dir = Vec3::new(self.light_orbit_rad.cos(), 0.30, self.light_orbit_rad.sin()).normalize();
+        let (planet_color, atmosphere_color) = atmospheric_palette(
+            self.atmosphere_strength,
+            0.7 + 0.3 * self.light_orbit_rad.cos().abs(),
+        );
+        let solar_glow = solar_halo_color(0.8 + 0.2 * self.light_orbit_rad.cos(), 0.7 + 0.3 * self.light_orbit_rad.cos().abs());
 
         self.frame_uniform.view_proj = view_proj.to_cols_array_2d();
         self.frame_uniform.model = planet_model.to_cols_array_2d();
         self.frame_uniform.light_dir = [light_dir.x, light_dir.y, light_dir.z, 0.0];
+        let eye = self.camera.eye();
         self.frame_uniform.camera_pos = [
-            self.camera.eye().x,
-            self.camera.eye().y,
-            self.camera.eye().z,
+            eye.x as f32,
+            eye.y as f32,
+            eye.z as f32,
             0.0,
+        ];
+        self.frame_uniform.planet_color = [
+            (planet_color[0] * 0.88 + solar_glow[0] * 0.12).clamp(0.0, 1.0),
+            (planet_color[1] * 0.88 + solar_glow[1] * 0.12).clamp(0.0, 1.0),
+            (planet_color[2] * 0.88 + solar_glow[2] * 0.12).clamp(0.0, 1.0),
+            1.0,
+        ];
+        self.frame_uniform.atmosphere_color = [
+            (atmosphere_color[0] * 0.78 + solar_glow[0] * 0.22).clamp(0.0, 1.0),
+            (atmosphere_color[1] * 0.78 + solar_glow[1] * 0.22).clamp(0.0, 1.0),
+            (atmosphere_color[2] * 0.78 + solar_glow[2] * 0.22).clamp(0.0, 1.0),
+            1.0,
         ];
         self.frame_uniform.atmosphere_strength = self.atmosphere_strength;
 
@@ -1117,9 +1269,9 @@ impl RenderState {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.005,
-                            g: 0.008,
-                            b: 0.018,
+                            r: sky_background_color(-0.9, self.elapsed_time_s)[0] as f64,
+                            g: sky_background_color(-0.9, self.elapsed_time_s)[1] as f64,
+                            b: sky_background_color(-0.9, self.elapsed_time_s)[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -1143,6 +1295,12 @@ impl RenderState {
                 pass.set_vertex_buffer(0, self.star_vertex_buffer.slice(..));
                 pass.draw(0..self.star_count, 0..1);
             }
+
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.view_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
+            pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.sky_index_count, 0, 0..1);
 
             if self.show_guides && self.guide_vertex_count > 1 {
                 pass.set_pipeline(&self.guide_pipeline);
@@ -1471,10 +1629,13 @@ fn create_scene(config_text: &str, star_shell_radius: f32) -> Result<SceneDefini
     let targets: Vec<SceneTarget> = config
         .targets
         .iter()
-        .map(|target| SceneTarget {
-            name: target.name.clone(),
-            position: ra_dec_to_cartesian(target, star_shell_radius),
-            luminance: priority_to_luminance(target.priority),
+        .map(|target| {
+            let position = ra_dec_to_cartesian_f64(target, star_shell_radius as f64);
+            SceneTarget {
+                name: target.name.clone(),
+                position: [position[0] as f32, position[1] as f32, position[2] as f32],
+                luminance: priority_to_luminance(target.priority),
+            }
         })
         .collect();
 
@@ -1484,9 +1645,9 @@ fn create_scene(config_text: &str, star_shell_radius: f32) -> Result<SceneDefini
     })
 }
 
-fn ra_dec_to_cartesian(target: &CampaignTargetConfig, radius: f32) -> [f32; 3] {
-    let ra = target.ra_deg.to_radians() as f32;
-    let dec = target.dec_deg.to_radians() as f32;
+fn ra_dec_to_cartesian_f64(target: &CampaignTargetConfig, radius: f64) -> [f64; 3] {
+    let ra = target.ra_deg.to_radians() as f64;
+    let dec = target.dec_deg.to_radians() as f64;
 
     let x = radius * dec.cos() * ra.cos();
     let y = radius * dec.sin();
@@ -1495,9 +1656,131 @@ fn ra_dec_to_cartesian(target: &CampaignTargetConfig, radius: f32) -> [f32; 3] {
     [x, y, z]
 }
 
+#[allow(dead_code)]
+fn ra_dec_to_cartesian(target: &CampaignTargetConfig, radius: f32) -> [f32; 3] {
+    let position = ra_dec_to_cartesian_f64(target, radius as f64);
+    [position[0] as f32, position[1] as f32, position[2] as f32]
+}
+
 fn priority_to_luminance(priority: u8) -> f32 {
     let normalized = (priority as f32 / 10.0).clamp(0.0, 1.0);
     0.30 + 0.70 * normalized
+}
+
+fn atmospheric_palette(atmosphere_strength: f32, light_tilt: f32) -> ([f32; 4], [f32; 4]) {
+    let glow = atmosphere_strength.clamp(0.0, 1.5);
+    let day_mix = (light_tilt * 0.5 + 0.5).clamp(0.0, 1.0);
+    let dawn_glow = (1.0 - (light_tilt - 0.65).abs() / 0.65).clamp(0.0, 1.0);
+
+    let planet = [
+        0.10 + 0.12 * day_mix + 0.08 * dawn_glow,
+        0.22 + 0.26 * day_mix + 0.12 * dawn_glow,
+        0.42 + 0.38 * day_mix + 0.22 * dawn_glow,
+        1.0,
+    ];
+    let atmosphere = [
+        0.18 + 0.46 * glow + 0.22 * dawn_glow,
+        0.28 + 0.54 * glow + 0.20 * dawn_glow,
+        0.68 + 0.26 * glow + 0.18 * dawn_glow,
+        1.0,
+    ];
+
+    (planet, atmosphere)
+}
+
+fn sky_background_color(elevation: f32, time_of_day: f32) -> [f32; 3] {
+    let norm = elevation.clamp(-1.0, 1.0);
+    let daylight = (0.5 + 0.5 * (time_of_day * 0.1).sin()).clamp(0.1, 1.0);
+    let zenith_factor = (norm + 1.0) * 0.5;
+    let horizon_factor = (1.0 - zenith_factor).max(0.0);
+    let contrast_boost = 0.22 + 0.38 * zenith_factor;
+
+    [
+        0.01 + 0.04 * daylight + contrast_boost * 0.85 - 0.08 * horizon_factor,
+        0.02 + 0.05 * daylight + contrast_boost * 0.92 - 0.10 * horizon_factor,
+        0.05 + 0.10 * daylight + contrast_boost * 1.12 + 0.14 * horizon_factor,
+    ]
+}
+
+fn tone_map_color(value: [f32; 3]) -> [f32; 3] {
+    let exposure = 1.42;
+    let mapped = [
+        value[0] * exposure,
+        value[1] * exposure,
+        value[2] * exposure,
+    ];
+    let gamma = [
+        mapped[0].powf(0.85),
+        mapped[1].powf(0.85),
+        mapped[2].powf(0.85),
+    ];
+
+    [
+        gamma[0].clamp(0.0, 1.0),
+        gamma[1].clamp(0.0, 1.0),
+        gamma[2].clamp(0.0, 1.0),
+    ]
+}
+
+fn solar_halo_color(elevation: f32, daylight: f32) -> [f32; 3] {
+    let norm = elevation.clamp(-1.0, 1.0);
+    let glow = daylight.clamp(0.0, 1.0);
+    let horizon = (1.0 - (norm + 1.0) * 0.5).clamp(0.0, 1.0);
+    let solar = 0.2 + 0.8 * glow * (1.0 - horizon * 0.65);
+
+    [
+        0.08 + 0.42 * solar,
+        0.14 + 0.46 * solar,
+        0.30 + 0.70 * solar,
+    ]
+}
+
+fn generate_sky_dome(lat_segments: u32, lon_segments: u32, radius: f32) -> (Vec<GuideVertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    for lat in 0..=lat_segments {
+        let v = lat as f32 / lat_segments as f32;
+        let theta = v * PI;
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        for lon in 0..=lon_segments {
+            let u = lon as f32 / lon_segments as f32;
+            let phi = u * 2.0 * PI;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            let x = radius * sin_theta * cos_phi;
+            let y = radius * cos_theta;
+            let z = radius * sin_theta * sin_phi;
+
+            let elevation = (y / radius).clamp(-1.0, 1.0);
+            let color = sky_background_color(elevation, 8.0);
+            vertices.push(GuideVertex {
+                position: [x, y, z],
+                color,
+            });
+        }
+    }
+
+    let ring = lon_segments + 1;
+    for lat in 0..lat_segments {
+        for lon in 0..lon_segments {
+            let idx0 = lat * ring + lon;
+            let idx1 = idx0 + 1;
+            let idx2 = idx0 + ring;
+            let idx3 = idx2 + 1;
+            indices.push(idx0);
+            indices.push(idx2);
+            indices.push(idx1);
+            indices.push(idx1);
+            indices.push(idx2);
+            indices.push(idx3);
+        }
+    }
+
+    (vertices, indices)
 }
 
 fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
@@ -1739,7 +2022,9 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        generate_background_stars, parse_cli_args, priority_to_luminance, ra_dec_to_cartesian,
+        atmospheric_palette, generate_background_stars, generate_sky_dome, parse_cli_args,
+        priority_to_luminance, ra_dec_to_cartesian, ra_dec_to_cartesian_f64, sky_background_color,
+        solar_halo_color, tone_map_color,
     };
     use observatory_core::CampaignTargetConfig;
 
@@ -1796,6 +2081,20 @@ mod tests {
     }
 
     #[test]
+    fn ra_dec_to_cartesian_f64_matches_equatorial_axis_precision() {
+        let target = CampaignTargetConfig {
+            name: "eq64".to_string(),
+            ra_deg: 90.0,
+            dec_deg: 30.0,
+            priority: 6,
+        };
+        let position = ra_dec_to_cartesian_f64(&target, 10.0);
+        assert!((position[0].abs() - 0.0).abs() < 1e-12);
+        assert!((position[1] - 5.0).abs() < 1e-12);
+        assert!((position[2] - 8.660254037844386).abs() < 1e-12);
+    }
+
+    #[test]
     fn generate_background_stars_has_expected_density_and_radius() {
         let field = generate_background_stars(256, 120.0);
         assert_eq!(field.len(), 256);
@@ -1806,5 +2105,46 @@ mod tests {
             assert!((radius_sq - 120.0 * 120.0).abs() < 1.0);
             assert!((star.luminance >= 0.15) && (star.luminance <= 1.0));
         }
+    }
+
+    #[test]
+    fn atmospheric_palette_remains_in_range_and_alpha_is_opaque() {
+        let (planet, atmosphere) = atmospheric_palette(0.75, 1.2);
+        assert!(planet[0].is_finite() && planet[1].is_finite() && planet[2].is_finite());
+        assert!(atmosphere[0].is_finite() && atmosphere[1].is_finite() && atmosphere[2].is_finite());
+        assert!((planet[3] - 1.0).abs() < 1e-6);
+        assert!((atmosphere[3] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sky_background_color_makes_zenith_brighter_than_horizon() {
+        let horizon = sky_background_color(-0.9, 8.0);
+        let zenith = sky_background_color(0.9, 8.0);
+        assert!(zenith[0] > horizon[0]);
+        assert!(zenith[1] > horizon[1]);
+        assert!(zenith[2] > horizon[2]);
+    }
+
+    #[test]
+    fn generate_sky_dome_creates_expected_geometry() {
+        let (vertices, indices) = generate_sky_dome(8, 12, 120.0);
+        assert_eq!(vertices.len(), (8 + 1) * (12 + 1));
+        assert_eq!(indices.len(), 8 * 12 * 6);
+        assert!(vertices.iter().all(|vertex| vertex.position.iter().all(|value| value.is_finite())));
+    }
+
+    #[test]
+    fn tone_map_color_keeps_values_in_unit_range() {
+        let tone = tone_map_color([3.0, 0.5, 2.0]);
+        assert!(tone.iter().all(|value| (*value >= 0.0) && (*value <= 1.0)));
+    }
+
+    #[test]
+    fn solar_halo_color_is_more_intense_in_daylight() {
+        let night = solar_halo_color(-0.8, 0.1);
+        let day = solar_halo_color(0.8, 0.9);
+        assert!(day[0] > night[0]);
+        assert!(day[1] > night[1]);
+        assert!(day[2] > night[2]);
     }
 }
