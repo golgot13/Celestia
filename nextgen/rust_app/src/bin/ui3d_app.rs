@@ -159,6 +159,93 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+const ATMOSPHERE_SHADER_WGSL: &str = r#"
+struct FrameUniform {
+    view_proj: mat4x4<f32>,
+    model: mat4x4<f32>,
+    light_dir: vec4<f32>,
+    camera_pos: vec4<f32>,
+    planet_color: vec4<f32>,
+    atmosphere_color: vec4<f32>,
+    atmosphere_strength: f32,
+    specular_power: f32,
+    specular_strength: f32,
+    body_time_s: f32,
+    interior_motion: f32,
+    atmosphere_motion: f32,
+    surface_texture_weight: f32,
+    _padding: f32,
+};
+
+@group(0) @binding(0)
+var<uniform> frame: FrameUniform;
+
+@group(0) @binding(1)
+var mars_layer_texture: texture_2d_array<f32>;
+
+@group(0) @binding(2)
+var mars_layer_sampler: sampler;
+
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) world_normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
+};
+
+fn hash31(p: vec3<f32>) -> f32 {
+    return fract(sin(dot(p, vec3<f32>(71.3, 183.1, 421.7))) * 9182.731);
+}
+
+fn soft_noise(p: vec3<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (vec3<f32>(3.0, 3.0, 3.0) - 2.0 * f);
+    let x00 = mix(hash31(i + vec3<f32>(0.0, 0.0, 0.0)), hash31(i + vec3<f32>(1.0, 0.0, 0.0)), u.x);
+    let x10 = mix(hash31(i + vec3<f32>(0.0, 1.0, 0.0)), hash31(i + vec3<f32>(1.0, 1.0, 0.0)), u.x);
+    let x01 = mix(hash31(i + vec3<f32>(0.0, 0.0, 1.0)), hash31(i + vec3<f32>(1.0, 0.0, 1.0)), u.x);
+    let x11 = mix(hash31(i + vec3<f32>(0.0, 1.0, 1.0)), hash31(i + vec3<f32>(1.0, 1.0, 1.0)), u.x);
+    return mix(mix(x00, x10, u.y), mix(x01, x11, u.y), u.z);
+}
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    let shell_position = input.position * 1.035;
+    let world = frame.model * vec4<f32>(shell_position, 1.0);
+    out.world_position = world.xyz;
+    out.world_normal = normalize((frame.model * vec4<f32>(input.normal, 0.0)).xyz);
+    out.uv = input.uv;
+    out.clip_position = frame.view_proj * world;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    let n = normalize(input.world_normal);
+    let l = normalize(frame.light_dir.xyz);
+    let v = normalize(frame.camera_pos.xyz - input.world_position);
+    let ndotl = max(dot(n, l), 0.0);
+    let ndotv = max(dot(n, v), 0.0);
+    let phase = frame.body_time_s * frame.atmosphere_motion;
+    let flow_uv = fract(input.uv + vec2<f32>(0.018 * phase, 0.006 * sin(0.31 * phase)));
+    let dust = textureSample(mars_layer_texture, mars_layer_sampler, flow_uv, 2);
+    let turbulence = soft_noise(n * 12.0 + vec3<f32>(0.09 * phase, 0.02 * phase, -0.06 * phase));
+    let limb = pow(1.0 - ndotv, 2.2);
+    let forward_scatter = pow(ndotl, 3.0);
+    let density = frame.atmosphere_strength * (0.16 + 0.84 * dust.a) * (0.65 + 0.35 * turbulence);
+    let alpha = clamp((0.030 + 0.22 * limb + 0.050 * forward_scatter) * density, 0.0, 0.32);
+    let color = frame.atmosphere_color.rgb * (0.45 + 0.55 * forward_scatter) + dust.rgb * 0.045;
+    return vec4<f32>(color, alpha);
+}
+"#;
+
 const STAR_SHADER_WGSL: &str = r#"
 struct ViewUniform {
     view_proj: mat4x4<f32>,
@@ -501,6 +588,7 @@ struct RenderState {
     depth: DepthBuffer,
 
     planet_pipeline: wgpu::RenderPipeline,
+    atmosphere_pipeline: wgpu::RenderPipeline,
     star_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     guide_pipeline: wgpu::RenderPipeline,
@@ -753,6 +841,11 @@ impl RenderState {
             source: wgpu::ShaderSource::Wgsl(PLANET_SHADER_WGSL.into()),
         });
 
+        let atmosphere_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("atmosphere_shader"),
+            source: wgpu::ShaderSource::Wgsl(ATMOSPHERE_SHADER_WGSL.into()),
+        });
+
         let star_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("star_shader"),
             source: wgpu::ShaderSource::Wgsl(STAR_SHADER_WGSL.into()),
@@ -835,6 +928,43 @@ impl RenderState {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        let atmosphere_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("atmosphere_pipeline"),
+            layout: Some(&planet_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &atmosphere_shader,
+                entry_point: "vs_main",
+                buffers: &[MeshVertex::layout()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &atmosphere_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
                 depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -1066,6 +1196,7 @@ impl RenderState {
             config,
             depth,
             planet_pipeline,
+            atmosphere_pipeline,
             star_pipeline,
             sky_pipeline,
             guide_pipeline,
@@ -1456,6 +1587,12 @@ impl RenderState {
             }
 
             pass.set_pipeline(&self.planet_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
+            pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.planet_index_count, 0, 0..1);
+
+            pass.set_pipeline(&self.atmosphere_pipeline);
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
             pass.set_vertex_buffer(0, self.planet_vertex_buffer.slice(..));
             pass.set_index_buffer(self.planet_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
