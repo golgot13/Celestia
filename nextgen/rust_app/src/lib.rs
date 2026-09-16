@@ -17,6 +17,7 @@ pub mod enclosure;
 pub mod ephemeris;
 pub mod execution;
 pub mod exoplanet;
+pub mod exploitation;
 pub mod fits;
 pub mod focus;
 pub mod geo;
@@ -44,6 +45,7 @@ pub mod scheduler;
 pub mod sequence;
 pub mod service;
 pub mod session;
+pub mod skymap;
 pub mod spectroscopy;
 pub mod stacking;
 pub mod stellar;
@@ -101,9 +103,14 @@ pub use exoplanet::{
     fit_transit_depth_least_squares, generate_transit_light_curve, transit_parameters_to_json,
     ExoplanetSystem, TransitFitResult, TransitLightCurvePoint, TransitParameters,
 };
+pub use exploitation::{
+    analyze_frame, compute_frame_statistics, detect_local_maxima, median_absolute_deviation_sigma,
+    scan_frame_directory, stack_frame_files, DetectedStar, DetectionParams, FrameAnalysis,
+    FrameFileEntry, FrameStatistics,
+};
 pub use fits::{
-    create_astronomical_fits_image, write_fits_binary, FitsBitPix, FitsHeader, FitsHeaderCard,
-    FitsImage,
+    create_astronomical_fits_image, parse_fits_image, read_fits_file, write_fits_binary,
+    FitsBitPix, FitsHeader, FitsHeaderCard, FitsImage,
 };
 pub use focus::{
     compute_critical_focus_zone_steps, compute_half_flux_diameter, fit_parabolic_v_curve,
@@ -188,6 +195,11 @@ pub use sequence::{build_sequence, SequencePlan, SequenceStep};
 pub use service::{execute_service, ServiceExecution, ServicePhase};
 pub use session::{
     build_session_summary, session_summary_to_json, write_session_summary_json, SessionSummary,
+};
+pub use skymap::{
+    build_sky_chart, ecliptic_vector_to_equatorial, place_object,
+    project_horizontal_to_unit_disk, sample_diurnal_track, SkyChart, SkyObjectClass,
+    SkyObjectPlacement, SkyObjectRequest, J2000_MEAN_OBLIQUITY_DEG,
 };
 pub use spectroscopy::{
     compute_doppler_radial_velocity, evaluate_wavelength_at_pixel, extract_1d_spectrum_from_2d,
