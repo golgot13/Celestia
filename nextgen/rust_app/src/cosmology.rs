@@ -11,6 +11,84 @@ pub enum SpatialGeometry {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UniverseModel {
+    PlanckLambdaCdm,
+    EinsteinDeSitter,
+    Milne,
+    DeSitter,
+    RadiationDominated,
+    OpenLambdaCdm,
+    ClosedLambdaCdm,
+}
+
+impl UniverseModel {
+    pub const ALL: [Self; 7] = [
+        Self::PlanckLambdaCdm,
+        Self::EinsteinDeSitter,
+        Self::Milne,
+        Self::DeSitter,
+        Self::RadiationDominated,
+        Self::OpenLambdaCdm,
+        Self::ClosedLambdaCdm,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::PlanckLambdaCdm => "Planck 2018 Lambda-CDM",
+            Self::EinsteinDeSitter => "Einstein-de Sitter",
+            Self::Milne => "Milne (vide, ouvert)",
+            Self::DeSitter => "de Sitter (Lambda)",
+            Self::RadiationDominated => "univers domine par le rayonnement",
+            Self::OpenLambdaCdm => "Lambda-CDM ouvert",
+            Self::ClosedLambdaCdm => "Lambda-CDM ferme",
+        }
+    }
+
+    pub fn parameters(self) -> CosmologicalParameters {
+        let h0 = CosmologicalParameters::PLANCK_2018.h0_km_s_mpc;
+        match self {
+            Self::PlanckLambdaCdm => CosmologicalParameters::PLANCK_2018,
+            Self::EinsteinDeSitter => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 1.0,
+                omega_radiation: 0.0,
+                omega_lambda: 0.0,
+            },
+            Self::Milne => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 0.0,
+                omega_radiation: 0.0,
+                omega_lambda: 0.0,
+            },
+            Self::DeSitter => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 0.0,
+                omega_radiation: 0.0,
+                omega_lambda: 1.0,
+            },
+            Self::RadiationDominated => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 0.0,
+                omega_radiation: 1.0,
+                omega_lambda: 0.0,
+            },
+            Self::OpenLambdaCdm => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 0.3,
+                omega_radiation: 0.0,
+                omega_lambda: 0.5,
+            },
+            Self::ClosedLambdaCdm => CosmologicalParameters {
+                h0_km_s_mpc: h0,
+                omega_matter: 0.8,
+                omega_radiation: 0.0,
+                omega_lambda: 0.5,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CosmologicalParameters {
     pub h0_km_s_mpc: f64,
@@ -52,9 +130,11 @@ impl CosmologicalParameters {
 
     pub fn geometry(self) -> SpatialGeometry {
         let curvature = self.omega_curvature();
-        if curvature > 1.0e-10 {
+        // Published parameter sets are rounded; classify residual curvature below 0.1%
+        // as flat instead of turning catalogue rounding into a different universe type.
+        if curvature > 1.0e-3 {
             SpatialGeometry::Open
-        } else if curvature < -1.0e-10 {
+        } else if curvature < -1.0e-3 {
             SpatialGeometry::Closed
         } else {
             SpatialGeometry::Flat
@@ -136,6 +216,45 @@ impl CosmologicalParameters {
         Ok((1.0 + redshift) * self.transverse_comoving_distance_mpc(redshift)?)
     }
 
+    pub fn angular_diameter_distance_mpc(self, redshift: f64) -> Result<f64, String> {
+        Ok(self.transverse_comoving_distance_mpc(redshift)? / (1.0 + redshift))
+    }
+
+    pub fn distance_modulus(self, redshift: f64) -> Result<f64, String> {
+        let distance_mpc = self.luminosity_distance_mpc(redshift)?;
+        if distance_mpc <= 0.0 {
+            return Err("le module de distance est indefini a z=0".to_string());
+        }
+        Ok(5.0 * distance_mpc.log10() + 25.0)
+    }
+
+    pub fn differential_comoving_volume_mpc3_per_sr(
+        self,
+        redshift: f64,
+    ) -> Result<f64, String> {
+        let transverse = self.transverse_comoving_distance_mpc(redshift)?;
+        let hubble = self.hubble_at_redshift(redshift)?;
+        Ok(SPEED_OF_LIGHT_KM_S * transverse * transverse / hubble)
+    }
+
+    pub fn deceleration_parameter(self, redshift: f64) -> Result<f64, String> {
+        let one_plus_z = 1.0 + redshift;
+        let hubble = self.hubble_at_redshift(redshift)?;
+        let numerator = 0.5 * self.omega_matter * one_plus_z.powi(3)
+            + self.omega_radiation * one_plus_z.powi(4)
+            - self.omega_lambda;
+        Ok(numerator / (hubble / self.h0_km_s_mpc).powi(2))
+    }
+
+    pub fn jerk_parameter(self, redshift: f64) -> Result<f64, String> {
+        let one_plus_z = 1.0 + redshift;
+        let hubble = self.hubble_at_redshift(redshift)?;
+        let numerator = self.omega_matter * one_plus_z.powi(3)
+            + 3.0 * self.omega_radiation * one_plus_z.powi(4)
+            + self.omega_lambda;
+        Ok(numerator / (hubble / self.h0_km_s_mpc).powi(2))
+    }
+
     pub fn scale_factor_at_age_gyr(self, age_gyr: f64) -> Result<f64, String> {
         self.validate()?;
         if !age_gyr.is_finite() || age_gyr < 0.0 || age_gyr > self.age_gyr()? {
@@ -188,7 +307,15 @@ fn integrate_simpson(function: impl Fn(f64) -> f64, lower: f64, upper: f64, inte
 
 #[cfg(test)]
 mod tests {
-    use super::{CosmologicalParameters, SpatialGeometry};
+    use super::{CosmologicalParameters, SpatialGeometry, UniverseModel};
+
+    #[test]
+    fn universe_presets_cover_distinct_physical_regimes() {
+        assert_eq!(UniverseModel::PlanckLambdaCdm.parameters().geometry(), SpatialGeometry::Flat);
+        assert_eq!(UniverseModel::Milne.parameters().geometry(), SpatialGeometry::Open);
+        assert_eq!(UniverseModel::ClosedLambdaCdm.parameters().geometry(), SpatialGeometry::Closed);
+        assert_eq!(UniverseModel::DeSitter.parameters().omega_lambda, 1.0);
+    }
 
     #[test]
     fn classifies_open_flat_and_closed_geometries() {
@@ -236,5 +363,20 @@ mod tests {
         assert!((age - 13.8).abs() < 0.2);
         assert!(distance > 6000.0);
         assert!((scale - 1.0).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn cosmography_observables_match_known_limits() {
+        let de_sitter = UniverseModel::DeSitter.parameters();
+        assert!((de_sitter.deceleration_parameter(0.0).unwrap() + 1.0).abs() < 1.0e-12);
+        assert!((de_sitter.jerk_parameter(0.0).unwrap() - 1.0).abs() < 1.0e-12);
+
+        let cosmology = CosmologicalParameters::PLANCK_2018;
+        assert!(cosmology.angular_diameter_distance_mpc(1.0).unwrap() > 1000.0);
+        assert!(cosmology.distance_modulus(1.0).unwrap() > 40.0);
+        assert!(cosmology
+            .differential_comoving_volume_mpc3_per_sr(1.0)
+            .unwrap()
+            > 1.0e10);
     }
 }

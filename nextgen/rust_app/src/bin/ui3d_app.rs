@@ -16,7 +16,7 @@ use observatory_core::{
     stack_frame_files, start_capture, AtmosphericConditions, BodyClass, BodyOrientation,
     CalibrationFrame, CampaignTarget, CampaignTargetConfig, CaptureResult, CaptureSession,
     CosmologicalParameters, DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord,
-    MountState, OrbitModel,
+    MountState, OrbitModel, UniverseModel,
     PointingModelTerms, PpmImage, QcThresholds, ReferencePlane, RingGeometry, SchedulePlan,
     SiteLimits, SkyChart, SkyObjectClass, SkyObjectRequest, SolarSystemBody, StackedResult,
     StackingMethod, StackingParams,
@@ -988,6 +988,7 @@ struct RenderState {
     operations: OperationsState,
     science: ScienceState,
     cosmology: CosmologicalParameters,
+    universe_model: UniverseModel,
     cosmology_redshift: f64,
     title_last_update: Instant,
 
@@ -1722,6 +1723,7 @@ impl RenderState {
             ),
             science: ScienceState::new(frames_dir, scene.calibration, scene.detection_threshold),
             cosmology: CosmologicalParameters::PLANCK_2018,
+            universe_model: UniverseModel::PlanckLambdaCdm,
             cosmology_redshift: 0.0,
             title_last_update: Instant::now(),
             egui_ctx,
@@ -3387,6 +3389,21 @@ impl RenderState {
                         ui.separator();
                         ui.label(RichText::new("Cosmologie FLRW").strong());
                         ui.label("Le fond cosmologique agit a grande echelle; les orbites locales restent calculees par gravitation.");
+                        let previous_model = self.universe_model;
+                        egui::ComboBox::from_label("modele d'univers")
+                            .selected_text(self.universe_model.label())
+                            .show_ui(ui, |ui| {
+                                for model in UniverseModel::ALL {
+                                    ui.selectable_value(
+                                        &mut self.universe_model,
+                                        model,
+                                        model.label(),
+                                    );
+                                }
+                            });
+                        if self.universe_model != previous_model {
+                            self.cosmology = self.universe_model.parameters();
+                        }
                         ui.horizontal(|ui| {
                             if ui.button("Ouvert").clicked() {
                                 self.cosmology.omega_lambda = 0.5;
@@ -3424,6 +3441,21 @@ impl RenderState {
                         ui.label(format!("geometrie: {geometry}"));
                         ui.label(format!("H(z): {hubble:.3} km/s/Mpc"));
                         ui.label(format!("distance luminosite: {distance:.3} Mpc"));
+                        ui.label(format!(
+                            "distance angulaire: {:.3} Mpc",
+                            self.cosmology
+                                .angular_diameter_distance_mpc(self.cosmology_redshift)
+                                .unwrap_or(f64::NAN)
+                        ));
+                        ui.label(format!(
+                            "q(z)={:.4}, j(z)={:.4}",
+                            self.cosmology
+                                .deceleration_parameter(self.cosmology_redshift)
+                                .unwrap_or(f64::NAN),
+                            self.cosmology
+                                .jerk_parameter(self.cosmology_redshift)
+                                .unwrap_or(f64::NAN)
+                        ));
                         ui.label(format!("age actuelle: {:.3} milliards d'annees", self.cosmology.age_gyr().unwrap_or(f64::NAN)));
 
                         ui.separator();
