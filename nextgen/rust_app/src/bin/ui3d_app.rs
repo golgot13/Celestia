@@ -3406,19 +3406,16 @@ impl RenderState {
                         }
                         ui.horizontal(|ui| {
                             if ui.button("Ouvert").clicked() {
-                                self.cosmology.omega_lambda = 0.5;
-                                self.cosmology.omega_matter = 0.3;
-                                self.cosmology.omega_radiation = 0.0;
+                                self.universe_model = UniverseModel::OpenLambdaCdm;
+                                self.cosmology = self.universe_model.parameters();
                             }
                             if ui.button("Plat").clicked() {
-                                self.cosmology.omega_lambda = 0.7;
-                                self.cosmology.omega_matter = 0.3;
-                                self.cosmology.omega_radiation = 0.0;
+                                self.universe_model = UniverseModel::PlanckLambdaCdm;
+                                self.cosmology = self.universe_model.parameters();
                             }
                             if ui.button("Ferme").clicked() {
-                                self.cosmology.omega_lambda = 0.5;
-                                self.cosmology.omega_matter = 0.8;
-                                self.cosmology.omega_radiation = 0.0;
+                                self.universe_model = UniverseModel::ClosedLambdaCdm;
+                                self.cosmology = self.universe_model.parameters();
                             }
                         });
                         ui.add(
