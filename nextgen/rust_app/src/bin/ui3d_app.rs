@@ -16,7 +16,7 @@ use observatory_core::{
     stack_frame_files, start_capture, AtmosphericConditions, BodyClass, BodyOrientation,
     CalibrationFrame, CampaignTarget, CampaignTargetConfig, CaptureResult, CaptureSession,
     CosmologicalParameters, DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord,
-    MountState, OrbitModel, UniverseModel,
+    LinearPerturbationParameters, MountState, OrbitModel, UniverseModel,
     PointingModelTerms, PpmImage, QcThresholds, ReferencePlane, RingGeometry, SchedulePlan,
     SiteLimits, SkyChart, SkyObjectClass, SkyObjectRequest, SolarSystemBody, StackedResult,
     StackingMethod, StackingParams,
@@ -3455,6 +3455,18 @@ impl RenderState {
                             self.cosmology
                                 .jerk_parameter(self.cosmology_redshift)
                                 .unwrap_or(f64::NAN)
+                        ));
+                        let scale_factor = 1.0 / (1.0 + self.cosmology_redshift);
+                        ui.label(format!(
+                            "croissance D(a)={:.5}, f(a)={:.5}",
+                            self.cosmology.linear_growth_factor(scale_factor).unwrap_or(f64::NAN),
+                            self.cosmology.linear_growth_rate(scale_factor).unwrap_or(f64::NAN)
+                        ));
+                        ui.label(format!(
+                            "perturbations: sigma8 {:.3}, n_s {:.3}, neutrinos Omega {:.4}",
+                            LinearPerturbationParameters::PLANCK_2018.sigma8,
+                            LinearPerturbationParameters::PLANCK_2018.scalar_spectral_index,
+                            LinearPerturbationParameters::PLANCK_2018.omega_neutrino
                         ));
                         ui.label(format!("age actuelle: {:.3} milliards d'annees", self.cosmology.age_gyr().unwrap_or(f64::NAN)));
 

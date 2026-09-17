@@ -1,4 +1,6 @@
-use observatory_core::{CosmologicalParameters, SpatialGeometry};
+use observatory_core::{
+    CosmologicalParameters, LinearPerturbationParameters, SpatialGeometry,
+};
 
 fn main() {
     let mut model = "flat";
@@ -87,6 +89,9 @@ fn main() {
     let luminosity = required(cosmology.luminosity_distance_mpc(redshift));
     let lookback = required(cosmology.lookback_time_gyr(redshift));
     let age = required(cosmology.age_gyr());
+    let scale_factor = 1.0 / (1.0 + redshift);
+    let growth = required(cosmology.linear_growth_factor(scale_factor));
+    let growth_rate = required(cosmology.linear_growth_rate(scale_factor));
 
     println!("{{");
     println!("  \"geometry\": \"{geometry}\",");
@@ -100,6 +105,10 @@ fn main() {
     println!("  \"comoving_distance_mpc\": {comoving:.8},");
     println!("  \"luminosity_distance_mpc\": {luminosity:.8},");
     println!("  \"lookback_time_gyr\": {lookback:.8},");
+    println!("  \"growth_factor\": {growth:.8},");
+    println!("  \"growth_rate\": {growth_rate:.8},");
+    println!("  \"sigma8\": {:.8},", LinearPerturbationParameters::PLANCK_2018.sigma8);
+    println!("  \"scalar_spectral_index\": {:.8},", LinearPerturbationParameters::PLANCK_2018.scalar_spectral_index);
     println!("  \"age_gyr\": {age:.8}");
     println!("}}");
 }

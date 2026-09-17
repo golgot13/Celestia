@@ -109,7 +109,9 @@ pub use acquisition::{
 };
 pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
 pub use config::{config_to_targets, parse_campaign_config, CampaignConfig, CampaignTargetConfig};
-pub use cosmology::{CosmologicalParameters, SpatialGeometry, UniverseModel};
+pub use cosmology::{
+    CosmologicalParameters, LinearPerturbationParameters, SpatialGeometry, UniverseModel,
+};
 pub use controller::{run_observation_cycle, ObservationControllerResult};
 pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
 pub use exoplanet::{

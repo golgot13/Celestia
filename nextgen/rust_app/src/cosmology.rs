@@ -97,6 +97,39 @@ pub struct CosmologicalParameters {
     pub omega_lambda: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinearPerturbationParameters {
+    pub sigma8: f64,
+    pub scalar_spectral_index: f64,
+    pub omega_baryon: f64,
+    pub omega_neutrino: f64,
+}
+
+impl LinearPerturbationParameters {
+    pub const PLANCK_2018: Self = Self {
+        sigma8: 0.811,
+        scalar_spectral_index: 0.965,
+        omega_baryon: 0.049,
+        omega_neutrino: 0.0014,
+    };
+
+    pub fn validate(self, cosmology: CosmologicalParameters) -> Result<Self, String> {
+        if !self.sigma8.is_finite()
+            || self.sigma8 <= 0.0
+            || !self.scalar_spectral_index.is_finite()
+            || self.scalar_spectral_index <= 0.0
+            || !self.omega_baryon.is_finite()
+            || !self.omega_neutrino.is_finite()
+            || self.omega_baryon < 0.0
+            || self.omega_neutrino < 0.0
+            || self.omega_baryon + self.omega_neutrino > cosmology.omega_matter
+        {
+            return Err("parametres de perturbations lineaires invalides".to_string());
+        }
+        Ok(self)
+    }
+}
+
 impl CosmologicalParameters {
     pub const PLANCK_2018: Self = Self {
         h0_km_s_mpc: 67.4,
@@ -281,6 +314,65 @@ impl CosmologicalParameters {
         Ok(0.5 * (low + high))
     }
 
+    pub fn matter_fraction_at_scale_factor(self, scale_factor: f64) -> Result<f64, String> {
+        self.validate()?;
+        if !scale_factor.is_finite() || scale_factor <= 0.0 {
+            return Err("le facteur d'echelle doit etre strictement positif".to_string());
+        }
+        let a = scale_factor;
+        let matter = self.omega_matter / a.powi(3);
+        let total = self.expansion_rate_at_scale_factor(a).powi(2);
+        Ok(matter / total)
+    }
+
+    pub fn linear_growth_factor(self, scale_factor: f64) -> Result<f64, String> {
+        self.validate()?;
+        if !scale_factor.is_finite() || !(0.0..=1.0).contains(&scale_factor) {
+            return Err("le facteur d'echelle doit etre compris entre 0 et 1".to_string());
+        }
+        let numerator = self.growth_unnormalized(scale_factor);
+        let normalization = self.growth_unnormalized(1.0);
+        Ok(numerator / normalization)
+    }
+
+    pub fn linear_growth_rate(self, scale_factor: f64) -> Result<f64, String> {
+        let omega_m = self.matter_fraction_at_scale_factor(scale_factor)?;
+        Ok(omega_m.powf(0.55))
+    }
+
+    fn growth_unnormalized(self, scale_factor: f64) -> f64 {
+        let a = scale_factor.max(1.0e-6);
+        let integral = integrate_simpson(
+            |x| 1.0 / (x.powi(3) * self.expansion_rate_at_scale_factor(x).powi(3)),
+            1.0e-6,
+            a,
+            2048,
+        );
+        2.5 * self.omega_matter * self.expansion_rate_at_scale_factor(a) * integral
+    }
+
+    pub fn linear_power_amplitude(
+        self,
+        perturbations: LinearPerturbationParameters,
+        wavenumber_h_mpc: f64,
+        scale_factor: f64,
+    ) -> Result<f64, String> {
+        perturbations.validate(self)?;
+        if !wavenumber_h_mpc.is_finite() || wavenumber_h_mpc <= 0.0 {
+            return Err("le nombre d'onde doit etre strictement positif".to_string());
+        }
+        let growth = self.linear_growth_factor(scale_factor)?;
+        let q = wavenumber_h_mpc
+            / (self.omega_matter * self.h0_km_s_mpc / 100.0).max(1.0e-12);
+        let transfer = (1.0 + 2.34 * q).ln() / (2.34 * q)
+            * (1.0 + 3.89 * q + (16.1 * q).powi(2) + (5.46 * q).powi(3) + (6.71 * q).powi(4))
+                .powf(-0.25);
+        Ok(perturbations.sigma8.powi(2)
+            * (wavenumber_h_mpc / 0.125).powf(perturbations.scalar_spectral_index)
+            * transfer.powi(2)
+            * growth.powi(2))
+    }
+
     fn expansion_rate_at_scale_factor(self, scale_factor: f64) -> f64 {
         let a = scale_factor.max(1.0e-8);
         let e2 = self.omega_radiation / a.powi(4)
@@ -307,7 +399,9 @@ fn integrate_simpson(function: impl Fn(f64) -> f64, lower: f64, upper: f64, inte
 
 #[cfg(test)]
 mod tests {
-    use super::{CosmologicalParameters, SpatialGeometry, UniverseModel};
+    use super::{
+        CosmologicalParameters, LinearPerturbationParameters, SpatialGeometry, UniverseModel,
+    };
 
     #[test]
     fn universe_presets_cover_distinct_physical_regimes() {
@@ -378,5 +472,17 @@ mod tests {
             .differential_comoving_volume_mpc3_per_sr(1.0)
             .unwrap()
             > 1.0e10);
+    }
+
+    #[test]
+    fn linear_growth_is_normalized_and_decreases_into_the_past() {
+        let cosmology = CosmologicalParameters::PLANCK_2018;
+        assert!((cosmology.linear_growth_factor(1.0).unwrap() - 1.0).abs() < 1.0e-12);
+        assert!(cosmology.linear_growth_factor(0.5).unwrap() < 1.0);
+        assert!(cosmology.linear_growth_rate(1.0).unwrap() > 0.0);
+        assert!(cosmology
+            .linear_power_amplitude(LinearPerturbationParameters::PLANCK_2018, 0.1, 1.0)
+            .unwrap()
+            > 0.0);
     }
 }
