@@ -149,6 +149,28 @@ Etat ASM64:
 - ajouter des logs structures pour chargement catalogue, GPU et ressources;
 - produire un paquet Release avec assets et exemple de catalogue minimal.
 
+### Cosmologie FLRW
+
+Le module `src/cosmology.rs` fournit un modele homogene et isotrope avec matiere,
+rayonnement, energie noire et courbure. Les geometries ouverte, plate et fermee
+sont determinees par `Omega_k = 1 - Omega_m - Omega_r - Omega_Lambda`.
+Il calcule `H(z)`, les distances comobiles et de luminosite, le temps de regard
+en arriere, l'age de l'univers et le facteur d'echelle.
+
+Le panneau `Simulateur spatial` expose les trois presets et le redshift. Le CLI
+reproductible est `cosmology_cli`:
+
+```powershell
+cargo run --release --manifest-path nextgen/rust_app/Cargo.toml --bin cosmology_cli -- --model flat --z 1
+```
+
+La gravitation newtonienne, l'integrateur N-body et la correction 1PN restent les
+lois de dynamique locale. La cosmologie FLRW est appliquee au fond a grande echelle;
+elle ne dilate pas artificiellement les orbites liees du systeme solaire.
+
+Ce modele ne pretend pas couvrir toute la relativite generale, les perturbations
+cosmologiques non lineaires, la magnetohydrodynamique ou la physique quantique.
+
 ## 7. Commandes de diagnostic
 
 ```powershell

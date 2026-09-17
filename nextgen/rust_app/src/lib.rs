@@ -10,6 +10,7 @@ pub mod calibration;
 pub mod campaign;
 pub mod catalog;
 pub mod config;
+pub mod cosmology;
 pub mod controller;
 pub mod cpu;
 pub mod deconvolution;
@@ -108,6 +109,7 @@ pub use acquisition::{
 };
 pub use campaign::{build_campaign, CampaignSummary, CampaignTarget};
 pub use config::{config_to_targets, parse_campaign_config, CampaignConfig, CampaignTargetConfig};
+pub use cosmology::{CosmologicalParameters, SpatialGeometry};
 pub use controller::{run_observation_cycle, ObservationControllerResult};
 pub use execution::{execute_campaign, CampaignExecutionReport, ExecutionSummary};
 pub use exoplanet::{

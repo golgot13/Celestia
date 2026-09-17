@@ -15,7 +15,8 @@ use observatory_core::{
     sample_diurnal_track, scan_frame_directory, schedule_observation_queue, solar_system_catalogue,
     stack_frame_files, start_capture, AtmosphericConditions, BodyClass, BodyOrientation,
     CalibrationFrame, CampaignTarget, CampaignTargetConfig, CaptureResult, CaptureSession,
-    DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord, MountState, OrbitModel,
+    CosmologicalParameters, DetectionParams, FrameAnalysis, FrameFileEntry, GeographicCoord,
+    MountState, OrbitModel,
     PointingModelTerms, PpmImage, QcThresholds, ReferencePlane, RingGeometry, SchedulePlan,
     SiteLimits, SkyChart, SkyObjectClass, SkyObjectRequest, SolarSystemBody, StackedResult,
     StackingMethod, StackingParams,
@@ -854,6 +855,12 @@ impl Camera {
         self.pitch = 0.18 * PI as f64;
         self.distance = 34.0;
     }
+
+    fn zoom_by(&mut self, amount: f64) {
+        const MIN_DISTANCE: f64 = 0.000001;
+        const MAX_DISTANCE: f64 = 120.0;
+        self.distance = (self.distance * (-amount).exp()).clamp(MIN_DISTANCE, MAX_DISTANCE);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -980,6 +987,8 @@ struct RenderState {
     nav_expanded: bool,
     operations: OperationsState,
     science: ScienceState,
+    cosmology: CosmologicalParameters,
+    cosmology_redshift: f64,
     title_last_update: Instant,
 
     egui_ctx: egui::Context,
@@ -1561,9 +1570,26 @@ impl RenderState {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        let background_stars = match options.catalog_path.as_deref() {
-            Some(path) => load_catalog_stars(path, options.catalog_limit, options.star_shell_radius)?,
-            None => generate_background_stars(2400, 120.0),
+        let catalog_path = resolve_catalog_path(options.catalog_path.as_deref())?;
+        let background_stars = match catalog_path.as_deref() {
+            Some(path) => {
+                let stars = load_catalog_stars(
+                    path.to_string_lossy().as_ref(),
+                    options.catalog_limit,
+                    options.star_shell_radius,
+                )?;
+                println!(
+                    "stellar_catalog={} stars_loaded={} magnitude_limit={:.2}",
+                    path.display(),
+                    stars.len(),
+                    options.catalog_limit
+                );
+                stars
+            }
+            None => {
+                println!("stellar_catalog=synthetic_fallback stars_loaded=2400");
+                generate_background_stars(2400, 120.0)
+            }
         };
         let star_vertices: Vec<StarVertex> = background_stars
             .into_iter()
@@ -1695,6 +1721,8 @@ impl RenderState {
                 frames_dir.clone(),
             ),
             science: ScienceState::new(frames_dir, scene.calibration, scene.detection_threshold),
+            cosmology: CosmologicalParameters::PLANCK_2018,
+            cosmology_redshift: 0.0,
             title_last_update: Instant::now(),
             egui_ctx,
             egui_state,
@@ -1786,7 +1814,7 @@ impl RenderState {
     fn update(&mut self, dt_s: f32) {
         let yaw_speed = 1.05_f64;
         let pitch_speed = 0.95_f64;
-        let zoom_speed = 2.8_f64;
+        let zoom_speed = 1.8_f64;
         let dt_s = dt_s as f64;
 
         if self.input.yaw_left {
@@ -1802,14 +1830,14 @@ impl RenderState {
             self.camera.pitch -= pitch_speed * dt_s;
         }
         if self.input.zoom_in {
-            self.camera.distance -= zoom_speed * dt_s;
+            self.camera.zoom_by(zoom_speed * dt_s);
         }
         if self.input.zoom_out {
-            self.camera.distance += zoom_speed * dt_s;
+            self.camera.zoom_by(-zoom_speed * dt_s);
         }
 
         if self.input.pending_scroll.abs() > f32::EPSILON {
-            self.camera.distance -= self.input.pending_scroll as f64 * 0.45;
+            self.camera.zoom_by(self.input.pending_scroll as f64 * 0.18);
             self.input.pending_scroll = 0.0;
         }
 
@@ -3357,6 +3385,48 @@ impl RenderState {
                         }
 
                         ui.separator();
+                        ui.label(RichText::new("Cosmologie FLRW").strong());
+                        ui.label("Le fond cosmologique agit a grande echelle; les orbites locales restent calculees par gravitation.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Ouvert").clicked() {
+                                self.cosmology.omega_lambda = 0.5;
+                                self.cosmology.omega_matter = 0.3;
+                                self.cosmology.omega_radiation = 0.0;
+                            }
+                            if ui.button("Plat").clicked() {
+                                self.cosmology.omega_lambda = 0.7;
+                                self.cosmology.omega_matter = 0.3;
+                                self.cosmology.omega_radiation = 0.0;
+                            }
+                            if ui.button("Ferme").clicked() {
+                                self.cosmology.omega_lambda = 0.5;
+                                self.cosmology.omega_matter = 0.8;
+                                self.cosmology.omega_radiation = 0.0;
+                            }
+                        });
+                        ui.add(
+                            egui::Slider::new(&mut self.cosmology_redshift, 0.0..=20.0)
+                                .text("redshift z"),
+                        );
+                        let geometry = match self.cosmology.geometry() {
+                            observatory_core::SpatialGeometry::Open => "ouverte",
+                            observatory_core::SpatialGeometry::Flat => "plate",
+                            observatory_core::SpatialGeometry::Closed => "fermee",
+                        };
+                        let hubble = self
+                            .cosmology
+                            .hubble_at_redshift(self.cosmology_redshift)
+                            .unwrap_or(f64::NAN);
+                        let distance = self
+                            .cosmology
+                            .luminosity_distance_mpc(self.cosmology_redshift)
+                            .unwrap_or(f64::NAN);
+                        ui.label(format!("geometrie: {geometry}"));
+                        ui.label(format!("H(z): {hubble:.3} km/s/Mpc"));
+                        ui.label(format!("distance luminosite: {distance:.3} Mpc"));
+                        ui.label(format!("age actuelle: {:.3} milliards d'annees", self.cosmology.age_gyr().unwrap_or(f64::NAN)));
+
+                        ui.separator();
                         ui.label(RichText::new("Corps celestes").strong());
                         ui.label(format!("{} corps simules", self.solar_system_bodies.len()));
                         if let Some(index) = self.selected_body_index {
@@ -4715,6 +4785,35 @@ fn generate_background_stars(count: usize, radius: f32) -> Vec<StarVertex> {
     stars
 }
 
+fn resolve_catalog_path(explicit_path: Option<&str>) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = explicit_path {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(format!("stellar catalogue '{}' does not exist", path.display()));
+        }
+        return Ok(Some(path));
+    }
+
+    if let Ok(path) = std::env::var("CELESTIA_STAR_CATALOG") {
+        let path = PathBuf::from(path);
+        if !path.is_file() {
+            return Err(format!(
+                "CELESTIA_STAR_CATALOG points to missing file '{}'",
+                path.display()
+            ));
+        }
+        return Ok(Some(path));
+    }
+
+    let candidates = [
+        PathBuf::from("assets/catalogs/stars.dat"),
+        PathBuf::from("assets/catalogs/hip_main.dat"),
+        PathBuf::from("stars.dat"),
+        PathBuf::from("hip_main.dat"),
+    ];
+    Ok(candidates.into_iter().find(|path| path.is_file()))
+}
+
 /// Flat annulus lying in the body equatorial plane. Vertices carry a unit direction and
 /// the radial fraction in `uv.x`, so one mesh serves every ring system.
 fn generate_ring_annulus(angular_segments: u32, radial_segments: u32) -> (Vec<MeshVertex>, Vec<u32>) {
@@ -4965,9 +5064,9 @@ mod tests {
         generate_background_stars, generate_ring_annulus, generate_sky_dome, generate_uv_sphere,
         parse_cli_args, percentile_value, priority_to_luminance, ra_dec_to_cartesian,
         ra_dec_to_cartesian_f64, reverse_z_perspective_rh, sky_background_color,
-        stacking_method_name, workspace_capabilities, Workspace, J2000_JULIAN_DAY,
+        stacking_method_name, workspace_capabilities, Camera, Workspace, J2000_JULIAN_DAY,
     };
-    use glam::DVec4;
+    use glam::{DVec3, DVec4};
     use observatory_core::{
         ecliptic_vector_to_equatorial, solar_system_catalogue, BodyClass, CampaignTargetConfig,
         PpmImage, StackingMethod,
@@ -5047,6 +5146,30 @@ mod tests {
             assert!((radius_sq - 120.0 * 120.0).abs() < 1.0);
             assert!((star.irradiance >= 0.15) && (star.irradiance <= 1.0));
         }
+    }
+
+    #[test]
+    fn zoom_is_relative_to_current_distance() {
+        let mut close_camera = Camera {
+            target: DVec3::ZERO,
+            yaw: 0.0,
+            pitch: 0.0,
+            distance: 1.0,
+            fov_deg: 56.0,
+            near_plane: 0.000001,
+            far_plane: 400.0,
+        };
+        let mut distant_camera = Camera {
+            distance: 100.0,
+            ..close_camera
+        };
+
+        close_camera.zoom_by(0.2);
+        distant_camera.zoom_by(0.2);
+
+        let close_ratio = close_camera.distance;
+        let distant_ratio = distant_camera.distance / 100.0;
+        assert!((close_ratio - distant_ratio).abs() < 1e-12);
     }
 
     #[test]
