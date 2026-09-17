@@ -4890,12 +4890,12 @@ fn generate_uv_sphere(
             let i3 = i2 + 1;
 
             indices.push(i0);
-            indices.push(i2);
             indices.push(i1);
+            indices.push(i2);
 
             indices.push(i1);
-            indices.push(i2);
             indices.push(i3);
+            indices.push(i2);
         }
     }
 
@@ -5066,7 +5066,7 @@ mod tests {
         ra_dec_to_cartesian_f64, reverse_z_perspective_rh, sky_background_color,
         stacking_method_name, workspace_capabilities, Camera, Workspace, J2000_JULIAN_DAY,
     };
-    use glam::{DVec3, DVec4};
+    use glam::{DVec3, DVec4, Vec3};
     use observatory_core::{
         ecliptic_vector_to_equatorial, solar_system_catalogue, BodyClass, CampaignTargetConfig,
         PpmImage, StackingMethod,
@@ -5202,6 +5202,21 @@ mod tests {
                 && vertex.uv[1] >= 0.0
                 && vertex.uv[1] <= 1.0
         }));
+    }
+
+    #[test]
+    fn generate_uv_sphere_faces_point_outward() {
+        let (vertices, indices) = generate_uv_sphere(8, 4, 1.0);
+        for triangle in indices.chunks_exact(3) {
+            let a = Vec3::from_array(vertices[triangle[0] as usize].position);
+            let b = Vec3::from_array(vertices[triangle[1] as usize].position);
+            let c = Vec3::from_array(vertices[triangle[2] as usize].position);
+            let geometric_normal = (b - a).cross(c - a);
+            let centroid = (a + b + c) / 3.0;
+            if geometric_normal.length_squared() > 1.0e-10 {
+                assert!(geometric_normal.dot(centroid) > 0.0);
+            }
+        }
     }
 
     #[test]
